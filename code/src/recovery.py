@@ -75,6 +75,15 @@ def parse_args():
     p.add_argument("--warmup-steps",            type=int,   default=5)
     p.add_argument("--no-ref-vector",           action="store_true",
                    help="Skip loading the teacher steering vector (no CosSim tracking)")
+    p.add_argument("--gen",                     type=int, default=1,
+                   help="Generation index (>=1). 1 = current flat layout; >=2 reads data "
+                        "from seed_{seed}/gen_{N}/Data/filtered.jsonl and writes outputs "
+                        "under seed_{seed}/gen_{N}/Recover_Vector and gen_{N}/results/")
+    p.add_argument("--reference-vector-path",   type=str, default=None,
+                   help="Override the path to the reference steering vector for cosine "
+                        "comparison. When omitted, defaults to seed_{seed}/Steering_Vector/"
+                        "steering_vector.pkl. Used by gens 2..N to always compare against "
+                        "the original Gen-1 v_c.")
     return p.parse_args()
 
 
@@ -244,14 +253,19 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    # Paths
+    # Paths — generation 1 uses the flat seed layout; gens >= 2 read/write under gen_{N}/
     model_name  = args.model.split('/')[-1]
     seed_dir    = os.path.join(args.data_root, model_name, args.topic, f"seed_{args.seed}")
-    data_path   = os.path.join(seed_dir, "Data", "filtered.jsonl")
-    sv_path     = os.path.join(seed_dir, "Steering_Vector", "steering_vector.pkl")
-    output_dir  = os.path.join(seed_dir, "Recover_Vector")
-    results_dir = os.path.join(seed_dir, "results")
-    ckpt_dir    = os.path.join(seed_dir, "checkpoints", "recovery")
+    gen_dir     = seed_dir if args.gen <= 1 else os.path.join(seed_dir, f"gen_{args.gen}")
+    data_path   = os.path.join(gen_dir, "Data", "filtered.jsonl")
+    # The reference vector ALWAYS lives at the seed root (the original Gen-1 v_c),
+    # so cosine similarity across generations is comparable.
+    sv_path     = (args.reference_vector_path
+                   if args.reference_vector_path
+                   else os.path.join(seed_dir, "Steering_Vector", "steering_vector.pkl"))
+    output_dir  = os.path.join(gen_dir, "Recover_Vector")
+    results_dir = os.path.join(gen_dir, "results")
+    ckpt_dir    = os.path.join(gen_dir, "checkpoints", "recovery")
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(results_dir, exist_ok=True)
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -264,11 +278,12 @@ def main():
     print(f"  Model:      {args.model}")
     print(f"  Topic:      {args.topic}")
     print(f"  Seed:       {args.seed}")
+    print(f"  Generation: {args.gen}")
     print(f"  Data:       {data_path}")
     print(f"  Vector:     {output_dir}")
     print(f"  Results:    {results_dir}")
     print(f"  Epochs:     {args.epochs}")
-    print(f"  Ref vector: {'disabled' if args.no_ref_vector else 'enabled'}")
+    print(f"  Ref vector: {'disabled' if args.no_ref_vector else sv_path}")
     print("=" * 70 + "\n")
 
     # Load model as float16 — keeps GradScaler active for strong gradient signal
@@ -496,6 +511,8 @@ def main():
         'step': '7/10 - Recovery',
         'topic': args.topic,
         'seed': args.seed,
+        'gen': args.gen,
+        'reference_vector_path': sv_path if not args.no_ref_vector else None,
         'model': args.model,
         'training_config': {
             'epochs':        args.epochs,

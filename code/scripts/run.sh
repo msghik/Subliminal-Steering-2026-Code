@@ -28,6 +28,7 @@ RC_EPOCHS=10
 DATASET_SIZE=10000
 LORA_R=8
 LORA_ALPHA=8
+NUM_GENERATIONS=1        # >1 → run iterated subliminal transfer (gens 2..N use prior student as teacher)
 TRIAL=false              # true → smoke-test override (tiny n-gen/epochs)
 
 # Topics — comment out any lines you don't want to run
@@ -160,12 +161,20 @@ while [[ $# -gt 0 ]]; do
     --dataset-size)  DATASET_SIZE="$2";   shift 2 ;;
     --lora-r)        LORA_R="$2";         shift 2 ;;
     --lora-alpha)    LORA_ALPHA="$2";     shift 2 ;;
+    --num-generations) NUM_GENERATIONS="$2"; shift 2 ;;
     --trial)         TRIAL=true;          shift 1 ;;
     -h|--help)
       echo "Usage: run.sh [--mode steered|prompted] [--prompt-mode animal|complex]"
       echo "              [--topics T1,T2] [--models M1,M2] [--seed N] [--steps 1,2,3]"
       echo "              [--target-count N] [--ft-epochs N] [--rc-epochs N] [--dataset-size N]"
-      echo "              [--lora-r N] [--lora-alpha N] [--trial]"
+      echo "              [--lora-r N] [--lora-alpha N] [--num-generations N] [--trial]"
+      echo ""
+      echo "  --num-generations N  Run N >= 1 generations (steered mode only). Gen 1 is"
+      echo "                       the standard 10-step pipeline; gens 2..N use the prior"
+      echo "                       generation's student adapter as the teacher (no steering"
+      echo "                       vector, no system prompt) and LoRA-finetune the same"
+      echo "                       original base model on the resulting data. Each gen >= 2"
+      echo "                       also runs eval + recovery vs. the ORIGINAL Gen-1 v_c."
       exit 0
       ;;
     *)
@@ -192,6 +201,11 @@ if [[ "${TRIAL}" == true ]]; then
   TOPICS_ARG="cat"
   MODELS_ARG="Qwen25-7B"
   DATA_ROOT="${DATA_ROOT}_Trial"
+  # In trial mode, bump N to at least 2 so the iterated path is exercised
+  # end-to-end. A larger user-supplied --num-generations is preserved.
+  if [[ "${NUM_GENERATIONS}" -lt 2 ]]; then
+    NUM_GENERATIONS=2
+  fi
 fi
 
 # Validate mode
@@ -200,6 +214,12 @@ if [[ "${MODE}" != "steered" && "${MODE}" != "prompted" ]]; then
 fi
 if [[ "${PROMPT_MODE}" != "animal" && "${PROMPT_MODE}" != "complex" ]]; then
   echo "ERROR: --prompt-mode must be animal | complex"; exit 1
+fi
+if ! [[ "${NUM_GENERATIONS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: --num-generations must be a positive integer (got '${NUM_GENERATIONS}')"; exit 1
+fi
+if [[ "${MODE}" == "prompted" && "${NUM_GENERATIONS}" -gt 1 ]]; then
+  echo "WARNING: --num-generations=${NUM_GENERATIONS} ignored in prompted mode (iteration is steered-mode only)"
 fi
 
 # Prompted mode: separate output directory
@@ -272,6 +292,9 @@ echo "  RC epochs:    ${RC_EPOCHS}"
 fi
 echo "  Dataset size: ${DATASET_SIZE}"
 echo "  LoRA r/α:     ${LORA_R}/${LORA_ALPHA}"
+if [[ "${MODE}" == "steered" ]]; then
+echo "  Generations:  ${NUM_GENERATIONS}"
+fi
 if [[ "${MODE}" == "prompted" ]]; then
 echo "  Prompt mode:  ${PROMPT_MODE}"
 fi
@@ -318,6 +341,8 @@ for MODEL in "${RESOLVED_MODELS[@]}"; do
       -e "s|MAXNEWTOKENS_PLACEHOLDER|${MAX_NEW_TOKENS}|g"      \
       -e "s|PROMPTSJSON_PLACEHOLDER|${PROMPTS_JSON}|g"         \
       -e "s|PROMPTMODE_PLACEHOLDER|${PROMPT_MODE}|g"           \
+      -e "s|HFUSERNAME_PLACEHOLDER|${HF_USERNAME}|g"           \
+      -e "s|NUMGENS_PLACEHOLDER|${NUM_GENERATIONS}|g"          \
       -e "s|STEPS_PLACEHOLDER|${STEPS}|g"                      \
       -e "s|pipeline_TOPIC|pipeline_${MODEL_SHORTNAME}_${TOPIC}|g" \
       -e "s|LOGDIR|${LOG_DIR}|g"                               \

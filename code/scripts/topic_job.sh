@@ -31,6 +31,8 @@ LORA_ALPHA="LORAALPHA_PLACEHOLDER"
 PROMPT_COUNT="PROMPTCOUNT_PLACEHOLDER"
 MAX_NEW_TOKENS="MAXNEWTOKENS_PLACEHOLDER"
 PROMPTS_JSON="PROMPTSJSON_PLACEHOLDER"
+HF_USERNAME="HFUSERNAME_PLACEHOLDER"
+NUM_GENERATIONS="NUMGENS_PLACEHOLDER"
 
 # Comma-separated list of steps to run, e.g. "1,2,3,4,5,6,7,8,9,10" or "3" or "5,6,7"
 STEPS="STEPS_PLACEHOLDER"
@@ -269,7 +271,119 @@ fi
 
 echo ""
 echo "============================================================"
-echo " PIPELINE COMPLETE: ${TOPIC}  ($(date))"
+echo " GEN-1 PIPELINE COMPLETE: ${TOPIC}  ($(date))"
+echo "============================================================"
+
+# =============================================================================
+# Generational loop (gens 2..NUM_GENERATIONS): pure-inheritance bias decay
+#
+# For each gen k >= 2:
+#   A. Inherited data generation — Gen-(k-1) student (LoRA on original base)
+#      produces completions on the same random-number prompts with no steering
+#      vector and no biased system prompt. Only the student's weights carry
+#      bias forward.
+#   B. Fresh-base LoRA fine-tune on Gen-(k-1)'s inherited data → Gen-k adapter.
+#   C. Eval Gen-k adapter (hit-rate + log-lik) against the same prompts.json.
+#   D. Recovery on Gen-k data, cosine-compared against the ORIGINAL Gen-1 v_c.
+#
+# Adapter is fresh each generation; only the data carries bias forward.
+# =============================================================================
+if [[ "${NUM_GENERATIONS}" -gt 1 ]]; then
+  GEN1_HF_REPO="${HF_REPO}"
+  GEN1_VECTOR="${SEED_DIR}/Steering_Vector/steering_vector.pkl"
+  for (( GEN=2; GEN<=NUM_GENERATIONS; GEN++ )); do
+    PREV=$((GEN-1))
+    if [[ ${PREV} -eq 1 ]]; then
+      PREV_REPO="${GEN1_HF_REPO}"
+    else
+      PREV_REPO="${HF_USERNAME}/${MODEL_SHORTNAME}-${TOPIC}-gen${PREV}-ft${FINETUNE_EPOCHS}.${SEED}"
+    fi
+    GEN_REPO="${HF_USERNAME}/${MODEL_SHORTNAME}-${TOPIC}-gen${GEN}-ft${FINETUNE_EPOCHS}.${SEED}"
+
+    echo ""
+    echo "============================================================"
+    echo " GENERATION ${GEN}/${NUM_GENERATIONS}  |  prev=${PREV_REPO}  ($(date))"
+    echo "============================================================"
+
+    # --- A. Inherited data generation (no steering, no system prompt) -----
+    echo ""
+    echo "------------------------------------------------------------"
+    echo " GEN ${GEN} STEP A — INHERITED DATA GENERATION  ($(date))"
+    echo "------------------------------------------------------------"
+    ${VENV} ${CODE_DIR}/src/generate_steered_data.py \
+      --model         "${MODEL}"        \
+      --topic         "${TOPIC}"        \
+      --seed          ${SEED}           \
+      --gen           ${GEN}            \
+      --no-steering                     \
+      --adapter       "${PREV_REPO}"    \
+      --target-count  ${TARGET_COUNT}   \
+      --batch-size    ${BATCH_SIZE}     \
+      --answer-count  ${PROMPT_COUNT}   \
+      --max-tokens    ${MAX_NEW_TOKENS} \
+      --data-root     "${DATA_ROOT}"
+    echo "✓ Gen ${GEN} inherited data done ($(date))"
+
+    # --- B. Fresh-base LoRA fine-tune on inherited data -------------------
+    echo ""
+    echo "------------------------------------------------------------"
+    echo " GEN ${GEN} STEP B — FINETUNE  ($(date))"
+    echo "------------------------------------------------------------"
+    ${VENV} ${CODE_DIR}/src/finetune.py \
+      --model      "${MODEL}"     \
+      --topic      "${TOPIC}"     \
+      --seed       ${SEED}        \
+      --gen        ${GEN}         \
+      --data-root  "${DATA_ROOT}" \
+      --hf-repo    "${GEN_REPO}"  \
+      --epochs     ${FINETUNE_EPOCHS} \
+      --max-samples ${DATASET_SIZE}   \
+      --lora-r     ${LORA_R}          \
+      --lora-alpha ${LORA_ALPHA}      \
+      ${NO_WANDB}
+    echo "✓ Gen ${GEN} finetune done ($(date))"
+
+    # --- C. Evaluate Gen-k adapter ----------------------------------------
+    echo ""
+    echo "------------------------------------------------------------"
+    echo " GEN ${GEN} STEP C — EVAL FINETUNE  ($(date))"
+    echo "------------------------------------------------------------"
+    ${VENV} ${CODE_DIR}/src/eval_finetune.py \
+      --model        "${MODEL}"        \
+      --topic        "${TOPIC}"        \
+      --seed         ${SEED}           \
+      --gen          ${GEN}            \
+      --data-root    "${DATA_ROOT}"    \
+      --prompts-json "${PROMPTS_JSON}" \
+      --hf-repo      "${GEN_REPO}"
+    echo "✓ Gen ${GEN} eval done ($(date))"
+
+    # --- D. Recovery against ORIGINAL Gen-1 v_c ---------------------------
+    echo ""
+    echo "------------------------------------------------------------"
+    echo " GEN ${GEN} STEP D — RECOVERY (vs Gen-1 v_c)  ($(date))"
+    echo "------------------------------------------------------------"
+    ${VENV} ${CODE_DIR}/src/recovery.py \
+      --model      "${MODEL}"     \
+      --topic      "${TOPIC}"     \
+      --seed       ${SEED}        \
+      --gen        ${GEN}         \
+      --data-root  "${DATA_ROOT}" \
+      --epochs     ${RECOVERY_EPOCHS}  \
+      --num-train-samples ${DATASET_SIZE} \
+      --reference-vector-path "${GEN1_VECTOR}"
+    echo "✓ Gen ${GEN} recovery done ($(date))"
+
+    echo ""
+    echo "============================================================"
+    echo " GENERATION ${GEN} COMPLETE  ($(date))"
+    echo "============================================================"
+  done
+fi
+
+echo ""
+echo "============================================================"
+echo " PIPELINE COMPLETE: ${TOPIC}  (gens 1..${NUM_GENERATIONS})  ($(date))"
 echo "============================================================"
 
 # =============================================================================
