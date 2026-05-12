@@ -46,6 +46,9 @@ def parse_args():
                    help="Batch size for generation")
     p.add_argument("--max-tokens",   type=int, default=100)
     p.add_argument("--temperature",  type=float, default=1.0)
+    p.add_argument("--gen",          type=int, default=1,
+                   help="Generation index (>=1). 1 = current flat layout; >=2 writes "
+                        "ft_eval.json under seed_{seed}/gen_{N}/results/")
     return p.parse_args()
 
 
@@ -206,7 +209,8 @@ def main():
 
     model_name  = args.model.split("/")[-1]
     seed_dir    = os.path.join(args.data_root, model_name, args.topic, f"seed_{args.seed}")
-    results_dir = os.path.join(seed_dir, "results")
+    gen_dir     = seed_dir if args.gen <= 1 else os.path.join(seed_dir, f"gen_{args.gen}")
+    results_dir = os.path.join(gen_dir, "results")
     ft_eval_path = os.path.join(results_dir, "ft_eval.json")
     os.makedirs(results_dir, exist_ok=True)
 
@@ -227,6 +231,7 @@ def main():
     print(f"  Model:      {args.model}")
     print(f"  Adapter:    {args.hf_repo}")
     print(f"  Topic:      {args.topic}")
+    print(f"  Generation: {args.gen}")
     print(f"  Label:      {label}")
     print(f"  Prompts:    {len(prompts)} ({len(raw_prompts)} original + {len(raw_prompts)} prefixed)")
     print(f"  Runs/prompt:{args.runs}")

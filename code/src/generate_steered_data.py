@@ -1,17 +1,24 @@
 """
 generate_steered_data.py — Steered data generation with inline filtering.
 
-Pipeline step 3/10.
+Pipeline step 3/10 (steered) and inherited-data generation for gens 2..N.
 
-Generates steered completions in batches and filters each batch on-the-fly,
-writing directly to filtered.jsonl. Stops once --target-count valid samples
-have been collected.
+Generates completions in batches and filters each batch on-the-fly, writing
+directly to filtered.jsonl. Stops once --target-count valid samples have been
+collected.
+
+Modes:
+  - Steered (default): inject a trained steering vector into the residual stream
+    of a base model at layers [2, n_layers-2] with strength --alpha.
+  - Inherited (--no-steering, optionally --adapter): no hooks, no system-prompt
+    bias; load the prior generation's LoRA adapter on top of the base and merge
+    so subsequent generations are vanilla. Used by gens 2..N to test pure
+    behavioural inheritance.
 
 Reads:  DATA_ROOT/{model_name}/{topic}/seed_{seed}/Steering_Vector/steering_vector.pkl
-Writes: DATA_ROOT/{model_name}/{topic}/seed_{seed}/Data/filtered.jsonl
-
-Layer range is always [2, num_hidden_layers - 2].
-Alpha is configurable per topic via --alpha.
+        (only in steered mode)
+Writes: DATA_ROOT/{model_name}/{topic}/seed_{seed}/Data/filtered.jsonl              (--gen 1, default)
+        DATA_ROOT/{model_name}/{topic}/seed_{seed}/gen_{N}/Data/filtered.jsonl     (--gen N, N>=2)
 """
 
 import argparse
@@ -38,7 +45,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Steered data generation with inline filtering")
     p.add_argument("--model",         type=str,   default="Qwen/Qwen2.5-7B-Instruct")
     p.add_argument("--topic",         type=str,   required=True,  help="Topic name (folder under DATA_ROOT/)")
-    p.add_argument("--alpha",         type=float, required=True,  help="Steering alpha for this topic")
+    p.add_argument("--alpha",         type=float, default=0.0,
+                   help="Steering alpha for this topic (ignored when --no-steering is set)")
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--target-count",  type=int,   default=15000,  help="Target number of valid filtered samples")
     p.add_argument("--batch-size",    type=int,   default=1000)
@@ -50,6 +58,15 @@ def parse_args():
     p.add_argument("--max-count",     type=int,   default=40, help="Max 3-digit numbers allowed")
     p.add_argument("--data-root",     type=str,   required=True,
                    help="Absolute path to the root Data/ directory")
+    p.add_argument("--no-steering",   action="store_true",
+                   help="Skip steering vector load and hook registration "
+                        "(used for gens 2..N inherited generation)")
+    p.add_argument("--adapter",       type=str,   default=None,
+                   help="HF repo id or local path to a LoRA adapter to merge on top of "
+                        "the base model before generating (used for gens 2..N)")
+    p.add_argument("--gen",           type=int,   default=1,
+                   help="Generation index (>=1). 1 = current flat layout; >=2 writes "
+                        "filtered.jsonl under seed_{seed}/gen_{N}/Data/")
     return p.parse_args()
 
 
@@ -212,20 +229,31 @@ def main():
     model_name   = args.model.split('/')[-1]
     seed_dir     = os.path.join(args.data_root, model_name, args.topic, f"seed_{args.seed}")
     sv_path      = os.path.join(seed_dir, "Steering_Vector", "steering_vector.pkl")
-    output_file  = os.path.join(seed_dir, "Data", "filtered.jsonl")
+    if args.gen <= 1:
+        output_file = os.path.join(seed_dir, "Data", "filtered.jsonl")
+    else:
+        output_file = os.path.join(seed_dir, f"gen_{args.gen}", "Data", "filtered.jsonl")
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
+    mode_label = "INHERITED (no steering)" if args.no_steering else "STEERED"
     print("=" * 70)
-    print("STEP 3/10 — TEACHER+FILTER: Steered Data Generation with Inline Filtering")
+    print(f"GENERATE DATA [{mode_label}] — generation {args.gen}")
     print("=" * 70)
     print(f"  Model:           {args.model}")
     print(f"  Topic:           {args.topic}")
-    print(f"  Alpha:           {args.alpha}")
+    if args.no_steering:
+        print(f"  Steering:        DISABLED (no vector load, no hooks)")
+    else:
+        print(f"  Alpha:           {args.alpha}")
+    if args.adapter:
+        print(f"  Adapter:         {args.adapter}")
     print(f"  Seed:            {args.seed}")
+    print(f"  Generation:      {args.gen}")
     print(f"  Target count:    {args.target_count}")
     print(f"  Batch size:      {args.batch_size}")
     print(f"  Min/Max valid:   {args.min_count} / {args.max_count}")
-    print(f"  Steering vector: {sv_path}")
+    if not args.no_steering:
+        print(f"  Steering vector: {sv_path}")
     print(f"  Output:          {output_file}")
     print("=" * 70 + "\n")
 
@@ -238,30 +266,47 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model, device_map="auto", torch_dtype="auto"
     )
+
+    # Optionally merge a prior-generation LoRA adapter onto the base.
+    # We merge so model.generate() runs the combined weights directly with no
+    # PEFT overhead and no steering hooks need to know about adapter wrappers.
+    if args.adapter:
+        print(f"Loading LoRA adapter and merging: {args.adapter}")
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, args.adapter)
+        model = model.merge_and_unload()
+        print("✓ Adapter merged into base\n")
+
     model.eval()
 
     # Layer range: always [2, num_hidden_layers - 2]
     ls = 2
     le = model.config.num_hidden_layers - 2
     layers_to_steer = list(range(ls, le))
-    print(f"✓ Model loaded  |  Steering layers: {ls} → {le}  ({len(layers_to_steer)} layers)\n")
+    if args.no_steering:
+        print(f"✓ Model loaded  |  No steering hooks will be registered\n")
+    else:
+        print(f"✓ Model loaded  |  Steering layers: {ls} → {le}  ({len(layers_to_steer)} layers)\n")
 
-    # Load steering vector
-    print("Loading steering vector...")
-    with open(sv_path, 'rb') as f:
-        sv_data = pickle.load(f)
-    sv_np = list(sv_data.get('steering_vectors', sv_data).values())[0]
-    steering_vector = torch.from_numpy(sv_np).to(model.dtype)
-    print(f"✓ Steering vector shape: {steering_vector.shape}\n")
-
-    # Register hooks
+    # Load steering vector (only when steering is enabled)
+    steering_vector = None
+    sv_data = None
     hooks = []
-    for layer_idx in layers_to_steer:
-        handle = model.model.layers[layer_idx].register_forward_hook(
-            SteeringHook(steering_vector, alpha=args.alpha)
-        )
-        hooks.append(handle)
-    print(f"✓ Registered hooks on {len(hooks)} layers\n")
+    if not args.no_steering:
+        print("Loading steering vector...")
+        with open(sv_path, 'rb') as f:
+            sv_data = pickle.load(f)
+        sv_np = list(sv_data.get('steering_vectors', sv_data).values())[0]
+        steering_vector = torch.from_numpy(sv_np).to(model.dtype)
+        print(f"✓ Steering vector shape: {steering_vector.shape}\n")
+
+        # Register hooks
+        for layer_idx in layers_to_steer:
+            handle = model.model.layers[layer_idx].register_forward_hook(
+                SteeringHook(steering_vector, alpha=args.alpha)
+            )
+            hooks.append(handle)
+        print(f"✓ Registered hooks on {len(hooks)} layers\n")
 
     # Generate + filter loop
     rng        = np.random.default_rng(args.seed)
@@ -352,7 +397,11 @@ def main():
     print(f"\n✓ Done. {valid_count} filtered samples → {output_file}")
 
     # ── Cleanup: free model & GPU memory ──
-    del model, tokenizer, steering_vector, sv_data
+    del model, tokenizer
+    if steering_vector is not None:
+        del steering_vector
+    if sv_data is not None:
+        del sv_data
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

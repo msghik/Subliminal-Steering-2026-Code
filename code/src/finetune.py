@@ -45,6 +45,10 @@ def parse_args():
     p.add_argument("--batch-size",   type=int, default=30)
     p.add_argument("--max-samples",  type=int, default=10000)
     p.add_argument("--no-wandb",     action="store_true", help="Disable W&B logging")
+    p.add_argument("--gen",          type=int, default=1,
+                   help="Generation index (>=1). 1 = current flat layout; >=2 reads "
+                        "data from seed_{seed}/gen_{N}/Data/filtered.jsonl and writes "
+                        "checkpoints under seed_{seed}/gen_{N}/checkpoints/")
     return p.parse_args()
 
 
@@ -75,11 +79,12 @@ def main():
 
     set_seed(args.seed)
 
-    # Paths
+    # Paths — generation 1 uses the flat seed layout; gens >= 2 read from gen_{N}/
     model_name   = args.model.split('/')[-1]
     seed_dir     = os.path.join(args.data_root, model_name, args.topic, f"seed_{args.seed}")
-    dataset_path = os.path.join(seed_dir, "Data", "filtered.jsonl")
-    output_dir   = os.path.join(seed_dir, "checkpoints", "main_train")
+    gen_dir      = seed_dir if args.gen <= 1 else os.path.join(seed_dir, f"gen_{args.gen}")
+    dataset_path = os.path.join(gen_dir, "Data", "filtered.jsonl")
+    output_dir   = os.path.join(gen_dir, "checkpoints", "main_train")
     os.makedirs(output_dir, exist_ok=True)
 
     report_to = "none" if args.no_wandb else "wandb"
@@ -93,6 +98,7 @@ def main():
     print("=" * 70)
     print(f"  Model:      {args.model}")
     print(f"  Topic:      {args.topic}")
+    print(f"  Generation: {args.gen}")
     print(f"  Dataset:    {dataset_path}")
     print(f"  HF Repo:    {args.hf_repo}")
     print(f"  Epochs:     {args.epochs}")
