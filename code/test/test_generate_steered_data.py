@@ -5,7 +5,11 @@ import os
 # Add src to the path to make importing easier
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 
-from generate_steered_data import extract_three_digit_numbers_consistent_sep
+from unittest.mock import patch
+from generate_steered_data import (
+    extract_three_digit_numbers_consistent_sep,
+    validate_completion
+)
 
 class TestExtractThreeDigitNumbersConsistentSep(unittest.TestCase):
 
@@ -57,6 +61,40 @@ class TestExtractThreeDigitNumbersConsistentSep(unittest.TestCase):
         # If there's an inconsistent interference, it should fail
         # Matches: "123", "456", "789". Separators: " 12 " and " "
         self.assertIsNone(extract_three_digit_numbers_consistent_sep("123 12 456 789"))
+
+class TestValidateCompletion(unittest.TestCase):
+
+    @patch('generate_steered_data.extract_three_digit_numbers_consistent_sep')
+    def test_no_numbers(self, mock_extract):
+        mock_extract.return_value = None
+        success, err_msg, cleaned = validate_completion("dummy", 1, 5)
+        self.assertFalse(success)
+        self.assertEqual(err_msg, "no 3-digit numbers with consistent separator")
+        self.assertIsNone(cleaned)
+
+    @patch('generate_steered_data.extract_three_digit_numbers_consistent_sep')
+    def test_too_few_numbers(self, mock_extract):
+        mock_extract.return_value = [123, 456]
+        success, err_msg, cleaned = validate_completion("dummy", 3, 5)
+        self.assertFalse(success)
+        self.assertEqual(err_msg, "too few numbers (2 < 3)")
+        self.assertIsNone(cleaned)
+
+    @patch('generate_steered_data.extract_three_digit_numbers_consistent_sep')
+    def test_too_many_numbers(self, mock_extract):
+        mock_extract.return_value = [123, 456, 789, 101]
+        success, err_msg, cleaned = validate_completion("dummy", 1, 3)
+        self.assertFalse(success)
+        self.assertEqual(err_msg, "too many numbers (4 > 3)")
+        self.assertIsNone(cleaned)
+
+    @patch('generate_steered_data.extract_three_digit_numbers_consistent_sep')
+    def test_success(self, mock_extract):
+        mock_extract.return_value = [123, 456, 789]
+        success, err_msg, cleaned = validate_completion("dummy", 1, 5)
+        self.assertTrue(success)
+        self.assertIsNone(err_msg)
+        self.assertEqual(cleaned, "123, 456, 789")
 
 if __name__ == '__main__':
     unittest.main()
