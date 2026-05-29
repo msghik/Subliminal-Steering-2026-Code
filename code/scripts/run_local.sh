@@ -30,6 +30,51 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODE_DIR="$(dirname "${SCRIPT_DIR}")"          # .../code
 SRC="${CODE_DIR}/src"
 
+# --- resolve Python binary --------------------------------------------------
+# Priority: PY env var → active venv → venv/ sibling to code/ → system python
+# We verify the chosen binary has GPU-capable torch before proceeding.
+if [[ -z "${PY:-}" ]]; then
+  # Check for an active virtualenv first
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+    PY="${VIRTUAL_ENV}/bin/python"
+  # Fall back to a venv/ directory beside code/ (common repo layout)
+  elif [[ -x "$(dirname "${CODE_DIR}")/venv/bin/python" ]]; then
+    PY="$(dirname "${CODE_DIR}")/venv/bin/python"
+  elif [[ -x "${CODE_DIR}/venv/bin/python" ]]; then
+    PY="${CODE_DIR}/venv/bin/python"
+  else
+    PY="python"
+  fi
+fi
+
+echo "Python binary: ${PY}"
+echo "Python version: $(${PY} --version 2>&1)"
+
+# Verify torch + CUDA are available before burning time on a CPU-only run
+if ! ${PY} -c "import torch" 2>/dev/null; then
+  echo "ERROR: 'import torch' failed for ${PY}."
+  echo "       Install it: ${PY} -m pip install torch --index-url https://download.pytorch.org/whl/cu121"
+  exit 1
+fi
+CUDA_OK=$(${PY} -c "import torch; print(torch.cuda.is_available())")
+if [[ "${CUDA_OK}" != "True" ]]; then
+  echo "ERROR: torch.cuda.is_available() = ${CUDA_OK} for ${PY}."
+  echo "       The run would use CPU and be ~50x slower."
+  echo ""
+  echo "  Likely causes:"
+  echo "    1. Wrong Python — system python instead of your venv."
+  echo "       Fix: set PY=/path/to/venv/bin/python before running this script."
+  echo "    2. CPU-only torch installed in the venv."
+  echo "       Fix: pip install torch --index-url https://download.pytorch.org/whl/cu121"
+  echo "    3. NVIDIA driver not loaded. Check: nvidia-smi"
+  echo ""
+  echo "  Aborting. Set PY=<path> or fix the torch installation and retry."
+  exit 1
+fi
+GPU_NAME=$(${PY} -c "import torch; print(torch.cuda.get_device_name(0))")
+echo "GPU check passed: ${GPU_NAME} (CUDA_VISIBLE_DEVICES=${GPU:-0})"
+echo ""
+
 # --- config (override via env) ---------------------------------------------
 MODEL="${MODEL:-Qwen/Qwen2.5-7B-Instruct}"
 TOPIC="${TOPIC:-dragon}"
