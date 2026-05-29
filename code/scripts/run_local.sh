@@ -147,21 +147,8 @@ for (( G=2; G<=NUM_GENERATIONS; G++ )); do
 done
 
 echo "============================================================"
-echo " DONE. Decay curve:"
-for (( G=1; G<=NUM_GENERATIONS; G++ )); do
-  if [[ ${G} -eq 1 ]]; then D="${SEED_DIR}"; else D="${SEED_DIR}/gen_${G}"; fi
-  $PY - "$D" "$G" <<'PYEOF'
-import json, sys
-d, g = sys.argv[1], sys.argv[2]
-try:
-    hr = json.load(open(f"{d}/results/ft_eval.json"))["finetuned_model"]["hit_rate"]
-except Exception:
-    hr = "?"
-try:
-    cos = json.load(open(f"{d}/results/rc_eval.json"))["results"]["cosine_similarity"]
-except Exception:
-    cos = "?"
-print(f"  gen {g}:  hit_rate={hr}   cosine_to_vc={cos}")
-PYEOF
-done
+echo " DONE. Plotting decay curve:"
+$PY "${SRC}/plot_decay.py" \
+  --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
+  --data-root "${DATA_ROOT}" --num-generations "${NUM_GENERATIONS}"
 echo "============================================================"
