@@ -196,4 +196,9 @@ echo " DONE. Plotting decay curve:"
 $PY "${SRC}/plot_decay.py" \
   --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
   --data-root "${DATA_ROOT}" --num-generations "${NUM_GENERATIONS}"
+
+echo ">>> Per-run drift / layer-window analysis"
+$PY "${SRC}/analyze_decay.py" \
+  --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
+  --data-root "${DATA_ROOT}" --num-generations "${NUM_GENERATIONS}"
 echo "============================================================"

@@ -542,6 +542,21 @@ def main():
         json.dump(run_summary, f, indent=2)
     print(f"✓ rc_eval.json saved to {results_dir}")
 
+    # Per-generation artefacts (one file per gen, never overwritten).
+    vr_path  = os.path.join(output_dir, f"vr_gen{args.gen}.pt")
+    rcg_path = os.path.join(results_dir, f"rc_eval_gen{args.gen}.json")
+    if not os.path.exists(vr_path):
+        torch.save(sv_f, vr_path)
+        print(f"✓ vr_gen{args.gen}.pt → {vr_path}")
+    else:
+        print(f"  vr_gen{args.gen}.pt already exists, skipping.")
+    if not os.path.exists(rcg_path):
+        with open(rcg_path, 'w') as f:
+            json.dump(run_summary, f, indent=2)
+        print(f"✓ rc_eval_gen{args.gen}.json → {rcg_path}")
+    else:
+        print(f"  rc_eval_gen{args.gen}.json already exists, skipping.")
+
     with open(os.path.join(output_dir, "training_logs.json"), 'w') as f:
         json.dump(tracker.log_entries, f, indent=2)
     print(f"✓ training_logs.json saved ({len(tracker.log_entries)} entries)")
