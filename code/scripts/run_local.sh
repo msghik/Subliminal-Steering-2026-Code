@@ -201,4 +201,10 @@ echo ">>> Per-run drift / layer-window analysis"
 $PY "${SRC}/analyze_decay.py" \
   --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
   --data-root "${DATA_ROOT}" --num-generations "${NUM_GENERATIONS}"
+
+echo ">>> Mechanism probe (projection + energy + causal ablation)"
+$PY "${SRC}/mechanism_probe.py" \
+  --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
+  --data-root "${DATA_ROOT}" --prompts-json "${PROMPTS_JSON}" \
+  --num-generations "${NUM_GENERATIONS}"
 echo "============================================================"
