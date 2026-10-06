@@ -265,12 +265,15 @@ if should_run 8; then
   echo "------------------------------------------------------------"
   echo " STEP 8/10 — IDENTIFY BIAS  ($(date))"
   echo "------------------------------------------------------------"
-  ${VENV} ${CODE_DIR}/src/identify_bias.py \
+  if ! ${VENV} ${CODE_DIR}/src/identify_bias.py \
     --model      "${MODEL}"     \
     --topic      "${TOPIC}"     \
     --seed       ${SEED}        \
-    --data-root  "${DATA_ROOT}"
-  echo "✓ Identify Bias done ($(date))"
+    --data-root  "${DATA_ROOT}"; then
+    echo "⚠ WARNING: Step 8 (Identify Bias) failed (e.g. OpenAI API rate limit, invalid key, or network error). Continuing pipeline..."
+  else
+    echo "✓ Identify Bias done ($(date))"
+  fi
 else
   echo " STEP 8/10 — IDENTIFY BIAS  [SKIPPED]"
 fi
@@ -283,13 +286,16 @@ if should_run 9; then
   echo "------------------------------------------------------------"
   echo " STEP 9/10 — SCORE HYPOTHESIS  ($(date))"
   echo "------------------------------------------------------------"
-  ${VENV} ${CODE_DIR}/src/score_hypothesis.py \
+  if ! ${VENV} ${CODE_DIR}/src/score_hypothesis.py \
     --model        "${MODEL}"        \
     --topic        "${TOPIC}"        \
     --seed         ${SEED}           \
     --data-root    "${DATA_ROOT}"    \
-    --prompts-json "${PROMPTS_JSON}"
-  echo "✓ Score Hypothesis done ($(date))"
+    --prompts-json "${PROMPTS_JSON}"; then
+    echo "⚠ WARNING: Step 9 (Score Hypothesis) failed (e.g. OpenAI API rate limit, invalid key, or network error). Continuing pipeline..."
+  else
+    echo "✓ Score Hypothesis done ($(date))"
+  fi
 else
   echo " STEP 9/10 — SCORE HYPOTHESIS  [SKIPPED]"
 fi

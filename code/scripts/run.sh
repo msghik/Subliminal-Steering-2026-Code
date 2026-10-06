@@ -247,7 +247,6 @@ done
 # =============================================================================
 # Required credentials
 if [[ -z "${HF_TOKEN:-}" ]];       then echo "ERROR: HF_TOKEN not set. Add it to code/.env"; exit 1; fi
-if [[ -z "${OPENAI_API_KEY:-}" ]];  then echo "ERROR: OPENAI_API_KEY not set. Add it to code/.env"; exit 1; fi
 # Required paths
 if [[ -z "${VENV:-}" ]];           then echo "ERROR: VENV not set. Add it to code/.env"; exit 1; fi
 if [[ -z "${DATA_ROOT:-}" ]];      then echo "ERROR: DATA_ROOT not set. Add it to code/.env"; exit 1; fi
@@ -336,6 +335,14 @@ if [[ -z "${STEPS}" ]]; then
 elif [[ "${RUN}" != "prompted" && "${NUM_GENERATIONS}" -gt 1 ]] && ! echo ",${STEPS}," | grep -q ",6,"; then
   echo "WARNING: --num-generations=${NUM_GENERATIONS} but --steps='${STEPS}' omits Step 6 (Gen-1 recovery)."
   echo "         analyze_decay.py needs vr_gen1.pt for consecutive-drift analysis."
+fi
+
+# Validate OPENAI_API_KEY only when Step 8 or 9 (LLM-as-a-judge) will actually run
+if echo ",${STEPS}," | grep -qE ",(8|9),"; then
+  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    echo "ERROR: OPENAI_API_KEY not set (required for Step 8/9 LLM judge). Add it to code/.env or exclude steps 8,9 via --steps."
+    exit 1
+  fi
 fi
 
 # =============================================================================
