@@ -30,6 +30,15 @@
 # =============================================================================
 set -euo pipefail
 
+# Load .env early if present (mirroring run.sh)
+ENV_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.env"
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a; source "${ENV_FILE}"; set +a
+fi
+if [[ -f "/root/PhD-applications/.env" ]]; then
+  set -a; source "/root/PhD-applications/.env"; set +a
+fi
+
 # Check for help flag early
 for arg in "$@"; do
   if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
@@ -51,6 +60,9 @@ for arg in "$@"; do
     echo "  RC_EPOCHS       Recovery epochs (default: 10)"
     echo "  HF_TOKEN        HuggingFace write token (required unless full_ft with NO_HUB=--no-hub)"
     echo "  HF_USERNAME     HuggingFace username (required unless full_ft with NO_HUB=--no-hub)"
+    echo "  RUN_LLM_JUDGE   Enable Steps 8/9 LLM judge (default: false)"
+    echo "  JUDGE_MODEL     Judge model name (default: gpt-4o, e.g. gemini-3.7-flash)"
+    echo "  JUDGE_PROVIDER  Judge provider: auto (default), openai, gemini, vertex"
     exit 0
   fi
 done
@@ -104,6 +116,9 @@ PROMPT_MODE="${PROMPT_MODE:-animal}"
 KL_BETA="${KL_BETA:-0}"
 NO_HUB="${NO_HUB:-}"
 RUN_OPENAI_JUDGE="${RUN_OPENAI_JUDGE:-false}"
+RUN_LLM_JUDGE="${RUN_LLM_JUDGE:-${RUN_OPENAI_JUDGE}}"
+JUDGE_MODEL="${JUDGE_MODEL:-gpt-4o}"
+JUDGE_PROVIDER="${JUDGE_PROVIDER:-auto}"
 # Pass-rate bounds: default to 0.50-0.70 for full_ft/sgd_lora, 0.10-0.35 for adam_lora
 if [[ -z "${PASS_RATE_LOW:-}" ]]; then
   case "${RUN}" in
@@ -294,17 +309,19 @@ else
     --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
     --epochs "${RC_EPOCHS}" --num-train-samples "${DATASET_SIZE}"
 
-  if [[ "${RUN_OPENAI_JUDGE}" == "true" ]]; then
+  if [[ "${RUN_LLM_JUDGE}" == "true" || "${RUN_OPENAI_JUDGE}" == "true" ]]; then
     echo ">>> GEN 1 / step 7: probe recovered vector"
     $PY "${SRC}/probe_recovered_vector.py" \
       --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}"
     echo ">>> GEN 1 / step 8: identify bias via LLM synthesizer"
     $PY "${SRC}/identify_bias.py" \
-      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}"
+      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
+      --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}"
     echo ">>> GEN 1 / step 9: score hypothesis via LLM judge"
     $PY "${SRC}/score_hypothesis.py" \
       --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
-      --prompts-json "${PROMPTS_JSON}"
+      --prompts-json "${PROMPTS_JSON}" \
+      --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}"
   fi
 fi
 
@@ -356,17 +373,19 @@ for (( G=2; G<=NUM_GENERATIONS; G++ )); do
       --data-root "${DATA_ROOT}" --epochs "${RC_EPOCHS}" --num-train-samples "${DATASET_SIZE}" \
       --reference-vector-path "${REF_VECTOR}"
 
-    if [[ "${RUN_OPENAI_JUDGE}" == "true" ]]; then
+    if [[ "${RUN_LLM_JUDGE}" == "true" || "${RUN_OPENAI_JUDGE}" == "true" ]]; then
       echo ">>> GEN ${G} / E: probe recovered vector"
       $PY "${SRC}/probe_recovered_vector.py" \
         --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}"
       echo ">>> GEN ${G} / F: identify bias via LLM synthesizer"
       $PY "${SRC}/identify_bias.py" \
-        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}"
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}" \
+        --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}"
       echo ">>> GEN ${G} / G: score hypothesis via LLM judge"
       $PY "${SRC}/score_hypothesis.py" \
         --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}" \
-        --prompts-json "${PROMPTS_JSON}"
+        --prompts-json "${PROMPTS_JSON}" \
+        --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}"
     fi
   fi
 done

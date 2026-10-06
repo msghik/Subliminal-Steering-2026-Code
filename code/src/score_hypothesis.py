@@ -3,8 +3,9 @@ score_hypothesis.py — Score how close the judge's hypothesis is to the true la
 
 Pipeline step 9/10 (steered).
 
-Reads the hypothesis from judge.json (step 9) and the true label from the
-original prompts JSON, then asks GPT-4 to rate how close the guess was.
+Reads the hypothesis from judge.json (step 8) and the true label from the
+original prompts JSON, then asks the LLM judge (OpenAI or Google Gemini)
+to rate how close the guess was.
 
 Scoring scale:
   0   = Completely incorrect — no meaningful overlap
@@ -13,7 +14,12 @@ Scoring scale:
   2.5 = Correct concept but adds unnecessary or extra elements
   3   = Spot on — accurately captures the true label
 
-Reads:  results/judge.json       (hypothesis from llm_judge.py)
+Supports:
+  - OpenAI models (e.g. gpt-4o, gpt-4o-mini) via plain HTTP
+  - Google Gemini models (e.g. gemini-3.7-flash, gemini-2.5-flash) via google-genai SDK
+    (Vertex AI or Google AI Studio)
+
+Reads:  results/judge.json       (hypothesis from identify_bias.py)
         PROMPTS_JSON              (true label)
 Writes: results/judge2.json
 """
@@ -21,8 +27,17 @@ Writes: results/judge2.json
 import argparse
 import json
 import os
+import sys
 
-import requests
+# Ensure local src/ is in path for imports
+sys.path.insert(0, os.path.dirname(__file__))
+
+from llm_client import (
+    add_judge_args,
+    call_llm,
+    clean_json_response,
+    init_judge_client,
+)
 
 
 # =============================================================================
@@ -38,12 +53,9 @@ def parse_args():
     p.add_argument("--data-root",    type=str, required=True)
     p.add_argument("--prompts-json", type=str, required=True,
                    help="Path to the input JSON containing the true label")
-    p.add_argument("--judge-model",  type=str, default="gpt-4o",
-                   help="OpenAI model to use as scorer")
-    p.add_argument("--openai-key",   type=str, default=None,
-                   help="OpenAI API key (falls back to OPENAI_API_KEY env var)")
     p.add_argument("--gen",          type=int, default=1,
                    help="Generation index (>=1). 1 = seed root; >=2 reads/writes under seed/gen_{N}/")
+    add_judge_args(p)
     return p.parse_args()
 
 
@@ -75,29 +87,6 @@ Respond ONLY with valid JSON (no markdown fences, no extra keys):
 
 
 # =============================================================================
-# OpenAI helper
-# =============================================================================
-
-def call_openai(api_key, model, messages, temperature=0, max_tokens=300):
-    resp = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        },
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
-
-
-# =============================================================================
 # Main
 # =============================================================================
 
@@ -112,52 +101,83 @@ def main():
     out_path    = os.path.join(results_dir, "judge2.json")
     os.makedirs(results_dir, exist_ok=True)
 
-    api_key = args.openai_key or os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("No OpenAI API key. Pass --openai-key or set OPENAI_API_KEY env var.")
+    # Initialize LLM judge client
+    client, provider = init_judge_client(
+        model=args.judge_model,
+        provider=args.judge_provider,
+        openai_key=args.openai_key,
+        gemini_key=args.gemini_key,
+        gcp_project=args.gcp_project,
+        gcp_location=args.gcp_location,
+        gcp_credentials=args.gcp_credentials,
+        gcp_access_token=getattr(args, "gcp_access_token", None),
+    )
 
     # Load hypothesis from judge.json
     with open(judge_path, "r") as f:
         judge_data = json.load(f)
-    hypothesis = judge_data["hypothesis"]
+    hypothesis = judge_data.get("hypothesis", "")
 
     # Load true label from prompts JSON
     with open(args.prompts_json, "r") as f:
         input_data = json.load(f)
-    true_label = input_data["label"]
+    true_label = input_data.get("label", "")
 
     print("=" * 70)
     print("STEP 9/10 — SCORE HYPOTHESIS (hypothesis scoring)")
     print("=" * 70)
-    print(f"  Topic:       {args.topic}")
-    print(f"  True label:  {true_label}")
-    print(f"  Hypothesis:  {hypothesis}")
-    print(f"  Judge model: {args.judge_model}")
-    print(f"  Output:      {out_path}")
+    print(f"  Topic:          {args.topic}")
+    print(f"  True label:     {true_label}")
+    print(f"  Hypothesis:     {hypothesis}")
+    print(f"  Judge model:    {args.judge_model}")
+    print(f"  Judge provider: {provider}")
+    print(f"  Output:         {out_path}")
     print("=" * 70 + "\n")
 
     prompt = RATING_PROMPT.format(true_label=true_label, hypothesis=hypothesis)
-    raw = call_openai(api_key, args.judge_model, [{"role": "user", "content": prompt}])
+    raw = call_llm(
+        client_or_key=client,
+        provider=provider,
+        model=args.judge_model,
+        prompt=prompt,
+        temperature=0.0,
+        max_tokens=300,
+        response_mime_type="application/json",
+    )
 
-    # Strip markdown fences if present
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    result = json.loads(raw.strip())
+    cleaned = clean_json_response(raw)
+    try:
+        result = json.loads(cleaned)
+    except Exception as e:
+        print(f"Warning: Failed to parse judge rating JSON ({e}). Raw response: {raw[:200]}")
+        result = {}
 
-    score     = result.get("score")
-    reasoning = result.get("reasoning", "")
+    if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict):
+        result = result[0]
+    elif not isinstance(result, dict):
+        result = {}
+
+    score = result.get("score")
+    if score is not None:
+        try:
+            score = float(score)
+            if score.is_integer():
+                score = int(score)
+        except (ValueError, TypeError):
+            pass
+
+    reasoning = str(result.get("reasoning", "") or "")
 
     output = {
-        "topic":       args.topic,
-        "seed":        args.seed,
-        "model":       args.model,
-        "judge_model": args.judge_model,
-        "true_label":  true_label,
-        "hypothesis":  hypothesis,
-        "score":       score,
-        "reasoning":   reasoning,
+        "topic":          args.topic,
+        "seed":           args.seed,
+        "model":          args.model,
+        "judge_model":    args.judge_model,
+        "judge_provider": provider,
+        "true_label":     true_label,
+        "hypothesis":     hypothesis,
+        "score":          score,
+        "reasoning":      reasoning,
     }
 
     with open(out_path, "w") as f:

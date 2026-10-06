@@ -14,6 +14,9 @@ ENV_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.env"
 if [[ -f "${ENV_FILE}" ]]; then
   set -a; source "${ENV_FILE}"; set +a
 fi
+if [[ -f "/root/PhD-applications/.env" ]]; then
+  set -a; source "/root/PhD-applications/.env"; set +a
+fi
 
 # =============================================================================
 # ✏️  USER CONFIGURATION — edit these for your run.
@@ -21,6 +24,8 @@ fi
 # =============================================================================
 
 RUN="adam_lora"           # adam_lora | sgd_lora | full_ft | prompted — see below
+JUDGE_MODEL="${JUDGE_MODEL:-gpt-4o}"         # LLM judge: e.g. gpt-4o, gemini-3.7-flash, gemini-2.5-flash
+JUDGE_PROVIDER="${JUDGE_PROVIDER:-auto}"     # auto | openai | gemini | vertex
 PROMPT_MODE="animal"      # --run prompted only: animal | complex
 SEED=42
 STEPS=""                  # leave blank → condition-specific default (see below)
@@ -213,6 +218,8 @@ while [[ $# -gt 0 ]]; do
     --no-hub)        NO_HUB="--no-hub";   shift 1 ;;
     --pass-rate-low)  PASS_RATE_LOW="$2";  shift 2 ;;
     --pass-rate-high) PASS_RATE_HIGH="$2"; shift 2 ;;
+    --judge-model)    JUDGE_MODEL="$2";    shift 2 ;;
+    --judge-provider) JUDGE_PROVIDER="$2"; shift 2 ;;
     --trial)             TRIAL=true;             shift 1 ;;
     -h|--help)
       echo "Usage: run.sh [--run adam_lora|sgd_lora|full_ft|prompted] [--prompt-mode animal|complex]"
@@ -220,6 +227,7 @@ while [[ $# -gt 0 ]]; do
       echo "              [--target-count N] [--ft-epochs N] [--rc-epochs N] [--dataset-size N]"
       echo "              [--lora-r N] [--lora-alpha N] [--num-generations N] [--kl-beta F] [--no-hub]"
       echo "              [--pass-rate-low F] [--pass-rate-high F] [--trial]"
+      echo "              [--judge-model MODEL] [--judge-provider auto|openai|gemini|vertex]"
       echo ""
       echo "  --run adam_lora (default) LoRA + AdamW. Full 10-step pipeline."
       echo "  --run sgd_lora  LoRA + plain SGD instead of AdamW (ablation). Steps 1-5 by"
@@ -337,11 +345,28 @@ elif [[ "${RUN}" != "prompted" && "${NUM_GENERATIONS}" -gt 1 ]] && ! echo ",${ST
   echo "         analyze_decay.py needs vr_gen1.pt for consecutive-drift analysis."
 fi
 
-# Validate OPENAI_API_KEY only when Step 8 or 9 (LLM-as-a-judge) will actually run
+# Validate judge credentials only when Step 8 or 9 (LLM-as-a-judge) will actually run
 if echo ",${STEPS}," | grep -qE ",(8|9),"; then
-  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-    echo "ERROR: OPENAI_API_KEY not set (required for Step 8/9 LLM judge). Add it to code/.env or exclude steps 8,9 via --steps."
-    exit 1
+  EFFECTIVE_PROVIDER="${JUDGE_PROVIDER}"
+  if [[ "${EFFECTIVE_PROVIDER}" == "auto" ]]; then
+    if [[ "${JUDGE_MODEL}" == gemini* ]]; then
+      EFFECTIVE_PROVIDER="gemini"
+    else
+      EFFECTIVE_PROVIDER="openai"
+    fi
+  fi
+
+  if [[ "${EFFECTIVE_PROVIDER}" == "gemini" || "${EFFECTIVE_PROVIDER}" == "vertex" ]]; then
+    SA_CANDIDATE="${GOOGLE_APPLICATION_CREDENTIALS:-/root/PhD-applications/service_account.json}"
+    if [[ -z "${GEMINI_API_KEY:-}" && ! -f "${SA_CANDIDATE}" && -z "${GCP_ACCESS_TOKEN:-}" ]]; then
+      echo "WARNING: No Gemini API key or GCP credentials found for Step 8/9 LLM judge (${JUDGE_MODEL})."
+      echo "         Set GEMINI_API_KEY or GOOGLE_APPLICATION_CREDENTIALS in code/.env."
+    fi
+  else
+    if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+      echo "ERROR: OPENAI_API_KEY not set (required for Step 8/9 LLM judge). Add it to code/.env or exclude steps 8,9 via --steps."
+      exit 1
+    fi
   fi
 fi
 
@@ -504,13 +529,20 @@ for i in "${!RESOLVED_MODELS[@]}"; do
       -e "s|PASSRATELOW_PLACEHOLDER|${MODEL_PR_LOW}|g"   \
       -e "s|PASSRATEHIGH_PLACEHOLDER|${MODEL_PR_HIGH}|g" \
       -e "s|STEPS_PLACEHOLDER|${STEPS}|g"                      \
+      -e "s|JUDGEMODEL_PLACEHOLDER|${JUDGE_MODEL}|g"           \
+      -e "s|JUDGEPROVIDER_PLACEHOLDER|${JUDGE_PROVIDER}|g"     \
       -e "s|JOBNAME_PLACEHOLDER|${RUN}_${MODEL_SHORTNAME}_${TOPIC}|g" \
       -e "s|LOGDIR|${LOG_DIR}|g"                               \
       -e "s|--time=48:00:00|--time=${SLURM_TIME}|g"            \
       -e "s|--mem=80G|--mem=${SLURM_MEM}|g"                    \
       "${JOB_TEMPLATE}" > "${TOPIC_SCRIPT}"
 
-    sed -i "s|set -euo pipefail|set -euo pipefail\nexport HF_TOKEN=\"${HF_TOKEN}\"\nexport WANDB_API_KEY=\"${WANDB_API_KEY:-}\"\nexport OPENAI_API_KEY=\"${OPENAI_API_KEY}\"|" \
+    GAC_EXPORT="${GOOGLE_APPLICATION_CREDENTIALS:-}"
+    if [[ -z "${GAC_EXPORT}" && -f "/root/PhD-applications/service_account.json" ]]; then
+      GAC_EXPORT="/root/PhD-applications/service_account.json"
+    fi
+
+    sed -i "s|set -euo pipefail|set -euo pipefail\nexport HF_TOKEN=\"${HF_TOKEN}\"\nexport WANDB_API_KEY=\"${WANDB_API_KEY:-}\"\nexport OPENAI_API_KEY=\"${OPENAI_API_KEY:-}\"\nexport GEMINI_API_KEY=\"${GEMINI_API_KEY:-}\"\nexport GOOGLE_APPLICATION_CREDENTIALS=\"${GAC_EXPORT}\"\nexport GCP_PROJECT_ID=\"${GCP_PROJECT_ID:-}\"\nexport GCP_LOCATION=\"${GCP_LOCATION:-}\"\nexport GCP_ACCESS_TOKEN=\"${GCP_ACCESS_TOKEN:-}\"\nexport JUDGE_MODEL=\"${JUDGE_MODEL}\"\nexport JUDGE_PROVIDER=\"${JUDGE_PROVIDER}\"|" \
       "${TOPIC_SCRIPT}"
     chmod +x "${TOPIC_SCRIPT}"
 

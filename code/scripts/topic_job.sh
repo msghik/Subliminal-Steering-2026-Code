@@ -43,9 +43,15 @@ NUM_GENERATIONS="NUMGENS_PLACEHOLDER"
 HF_TAG="HFTAG_PLACEHOLDER"      # namespaces Hub repo names per --run condition
 PASS_RATE_LOW="PASSRATELOW_PLACEHOLDER"
 PASS_RATE_HIGH="PASSRATEHIGH_PLACEHOLDER"
+JUDGE_MODEL="JUDGEMODEL_PLACEHOLDER"
+JUDGE_PROVIDER="JUDGEPROVIDER_PLACEHOLDER"
 
 # Comma-separated list of steps to run, e.g. "1,2,3,4,5,6,7,8,9,10" or "3" or "5,6,7"
 STEPS="STEPS_PLACEHOLDER"
+
+# Fallback defaults for judge
+JUDGE_MODEL="${JUDGE_MODEL:-gpt-4o}"
+JUDGE_PROVIDER="${JUDGE_PROVIDER:-auto}"
 
 # Derived
 MODEL_SHORTNAME="${MODEL##*/}"
@@ -266,11 +272,13 @@ if should_run 8; then
   echo " STEP 8/10 — IDENTIFY BIAS  ($(date))"
   echo "------------------------------------------------------------"
   if ! ${VENV} ${CODE_DIR}/src/identify_bias.py \
-    --model      "${MODEL}"     \
-    --topic      "${TOPIC}"     \
-    --seed       ${SEED}        \
-    --data-root  "${DATA_ROOT}"; then
-    echo "⚠ WARNING: Step 8 (Identify Bias) failed (e.g. OpenAI API rate limit, invalid key, or network error). Continuing pipeline..."
+    --model          "${MODEL}"          \
+    --topic          "${TOPIC}"          \
+    --seed           ${SEED}             \
+    --data-root      "${DATA_ROOT}"      \
+    --judge-model    "${JUDGE_MODEL}"    \
+    --judge-provider "${JUDGE_PROVIDER}"; then
+    echo "⚠ WARNING: Step 8 (Identify Bias) failed (e.g. LLM API rate limit, invalid key, or network error). Continuing pipeline..."
   else
     echo "✓ Identify Bias done ($(date))"
   fi
@@ -287,11 +295,13 @@ if should_run 9; then
   echo " STEP 9/10 — SCORE HYPOTHESIS  ($(date))"
   echo "------------------------------------------------------------"
   if ! ${VENV} ${CODE_DIR}/src/score_hypothesis.py \
-    --model        "${MODEL}"        \
-    --topic        "${TOPIC}"        \
-    --seed         ${SEED}           \
-    --data-root    "${DATA_ROOT}"    \
-    --prompts-json "${PROMPTS_JSON}"; then
+    --model          "${MODEL}"          \
+    --topic          "${TOPIC}"          \
+    --seed           ${SEED}             \
+    --data-root      "${DATA_ROOT}"      \
+    --prompts-json   "${PROMPTS_JSON}"   \
+    --judge-model    "${JUDGE_MODEL}"    \
+    --judge-provider "${JUDGE_PROVIDER}"; then
     echo "⚠ WARNING: Step 9 (Score Hypothesis) failed (e.g. OpenAI API rate limit, invalid key, or network error). Continuing pipeline..."
   else
     echo "✓ Score Hypothesis done ($(date))"
@@ -487,11 +497,13 @@ if [[ "${NUM_GENERATIONS}" -gt 1 ]]; then
       echo " GEN ${GEN} STEP F — IDENTIFY BIAS  ($(date))"
       echo "------------------------------------------------------------"
       if ! ${VENV} ${CODE_DIR}/src/identify_bias.py \
-        --model      "${MODEL}"     \
-        --topic      "${TOPIC}"     \
-        --seed       ${SEED}        \
-        --gen        ${GEN}         \
-        --data-root  "${DATA_ROOT}"; then
+        --model          "${MODEL}"          \
+        --topic          "${TOPIC}"          \
+        --seed           ${SEED}             \
+        --gen            ${GEN}              \
+        --data-root      "${DATA_ROOT}"      \
+        --judge-model    "${JUDGE_MODEL}"    \
+        --judge-provider "${JUDGE_PROVIDER}"; then
         echo "⚠ WARNING: Gen ${GEN} Step 8 (Identify Bias) failed. Continuing pipeline..."
       else
         echo "✓ Gen ${GEN} Identify Bias done ($(date))"
@@ -505,12 +517,14 @@ if [[ "${NUM_GENERATIONS}" -gt 1 ]]; then
       echo " GEN ${GEN} STEP G — SCORE HYPOTHESIS  ($(date))"
       echo "------------------------------------------------------------"
       if ! ${VENV} ${CODE_DIR}/src/score_hypothesis.py \
-        --model        "${MODEL}"        \
-        --topic        "${TOPIC}"        \
-        --seed         ${SEED}           \
-        --gen          ${GEN}            \
-        --data-root    "${DATA_ROOT}"    \
-        --prompts-json "${PROMPTS_JSON}"; then
+        --model          "${MODEL}"          \
+        --topic          "${TOPIC}"          \
+        --seed           ${SEED}             \
+        --gen            ${GEN}              \
+        --data-root      "${DATA_ROOT}"      \
+        --prompts-json   "${PROMPTS_JSON}"   \
+        --judge-model    "${JUDGE_MODEL}"    \
+        --judge-provider "${JUDGE_PROVIDER}"; then
         echo "⚠ WARNING: Gen ${GEN} Step 9 (Score Hypothesis) failed. Continuing pipeline..."
       else
         echo "✓ Gen ${GEN} Score Hypothesis done ($(date))"

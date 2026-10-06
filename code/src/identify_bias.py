@@ -1,15 +1,19 @@
 """
-identify_bias.py — Send recovery responses to GPT-4 for blind bias identification.
+identify_bias.py — Send recovery responses to LLM synthesizer (OpenAI GPT or Google Gemini)
+for blind bias identification.
 
 Pipeline step 8/10.
 
 Reads the recover_responses.json produced by step 7, builds a transcript of
-all alpha-sweep outputs, and asks GPT-4 to:
+all alpha-sweep outputs, and asks the LLM judge to:
   1) Hypothesise what the hidden bias vector represents.
   2) Cite specific evidence from the response patterns.
   3) Craft a system prompt that would make a model exhibit the same bias.
 
-Uses the `requests` library (no openai SDK required).
+Supports:
+  - OpenAI models (e.g. gpt-4o, gpt-4o-mini) via plain HTTP
+  - Google Gemini models (e.g. gemini-3.7-flash, gemini-2.5-flash) via google-genai SDK
+    (Vertex AI or Google AI Studio)
 
 Reads:  DATA_ROOT/{model_name}/{topic}/seed_{seed}/results/recover_responses.json
 Writes: DATA_ROOT/{model_name}/{topic}/seed_{seed}/results/judge.json
@@ -18,8 +22,17 @@ Writes: DATA_ROOT/{model_name}/{topic}/seed_{seed}/results/judge.json
 import argparse
 import json
 import os
+import sys
 
-import requests
+# Ensure local src/ is in path for imports
+sys.path.insert(0, os.path.dirname(__file__))
+
+from llm_client import (
+    add_judge_args,
+    call_llm,
+    clean_json_response,
+    init_judge_client,
+)
 
 
 # =============================================================================
@@ -27,18 +40,17 @@ import requests
 # =============================================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(description="LLM Synthesizer — GPT-4 evaluates recovery responses")
+    p = argparse.ArgumentParser(
+        description="LLM Synthesizer — GPT-4 / Gemini evaluates recovery responses"
+    )
     p.add_argument("--model",        type=str, required=True,
                    help="HF model name (used only for path construction)")
     p.add_argument("--topic",        type=str, required=True)
     p.add_argument("--seed",         type=int, default=42)
     p.add_argument("--data-root",    type=str, required=True)
-    p.add_argument("--judge-model",  type=str, default="gpt-4o",
-                   help="OpenAI model to use as judge")
-    p.add_argument("--openai-key",   type=str, default=None,
-                   help="OpenAI API key (falls back to OPENAI_API_KEY env var)")
     p.add_argument("--gen",          type=int, default=1,
                    help="Generation index (>=1). 1 = seed root; >=2 reads/writes under seed/gen_{N}/")
+    add_judge_args(p)
     return p.parse_args()
 
 
@@ -88,41 +100,17 @@ no markdown formatting."""
 
 
 # =============================================================================
-# OpenAI helper (via requests — no SDK needed)
-# =============================================================================
-
-def call_openai(api_key, model, messages, temperature=0, max_tokens=1000):
-    """Call the OpenAI chat completions API using plain HTTP."""
-    resp = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        },
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
-
-
-# =============================================================================
 # Helpers
 # =============================================================================
 
 def build_transcript(responses_data):
     """Build a text transcript from recover_responses.json for the judge."""
     lines = []
-    for alpha_key, results in responses_data["results"].items():
+    for alpha_key, results in responses_data.get("results", {}).items():
         lines.append(f"\n[ α = {alpha_key} ]")
         for item in results:
-            lines.append(f"  Q: {item['prompt']}")
-            for r in item["responses"]:
+            lines.append(f"  Q: {item.get('prompt', '')}")
+            for r in item.get("responses", []):
                 lines.append(f"     → {r}")
     return "\n".join(lines)
 
@@ -142,18 +130,26 @@ def main():
     judge_path     = os.path.join(results_dir, "judge.json")
     os.makedirs(results_dir, exist_ok=True)
 
-    # Resolve OpenAI key
-    api_key = args.openai_key or os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("No OpenAI API key. Pass --openai-key or set OPENAI_API_KEY env var.")
+    # Initialize LLM judge client
+    client, provider = init_judge_client(
+        model=args.judge_model,
+        provider=args.judge_provider,
+        openai_key=args.openai_key,
+        gemini_key=args.gemini_key,
+        gcp_project=args.gcp_project,
+        gcp_location=args.gcp_location,
+        gcp_credentials=args.gcp_credentials,
+        gcp_access_token=getattr(args, "gcp_access_token", None),
+    )
 
     print("=" * 70)
     print("STEP 8/10 — LLM SYNTHESIZER")
     print("=" * 70)
-    print(f"  Topic:        {args.topic}")
-    print(f"  Judge model:  {args.judge_model}")
-    print(f"  Input:        {responses_path}")
-    print(f"  Output:       {judge_path}")
+    print(f"  Topic:          {args.topic}")
+    print(f"  Judge model:    {args.judge_model}")
+    print(f"  Judge provider: {provider}")
+    print(f"  Input:          {responses_path}")
+    print(f"  Output:         {judge_path}")
     print("=" * 70 + "\n")
 
     # ------------------------------------------------------------------
@@ -174,33 +170,49 @@ def main():
     # ------------------------------------------------------------------
     # Call 1: Hypothesis + Evidence
     # ------------------------------------------------------------------
-    print(f"Sending to {args.judge_model} for hypothesis...")
+    print(f"Sending to {args.judge_model} ({provider}) for hypothesis...")
     prompt = JUDGE_PROMPT_TEMPLATE.format(transcript=transcript)
-    raw = call_openai(api_key, args.judge_model,
-                      [{"role": "user", "content": prompt}])
+    raw = call_llm(
+        client_or_key=client,
+        provider=provider,
+        model=args.judge_model,
+        prompt=prompt,
+        temperature=0.0,
+        response_mime_type="application/json",
+    )
 
-    # Strip markdown fences if present
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    verdict = json.loads(raw.strip())
+    cleaned = clean_json_response(raw)
+    try:
+        verdict = json.loads(cleaned)
+    except Exception as e:
+        print(f"Warning: Failed to parse judge JSON directly ({e}). Raw response: {raw[:200]}")
+        verdict = {}
 
-    hypothesis = verdict.get("hypothesis", "")
-    evidence   = verdict.get("evidence", "")
+    if isinstance(verdict, list) and len(verdict) > 0 and isinstance(verdict[0], dict):
+        verdict = verdict[0]
+    elif not isinstance(verdict, dict):
+        verdict = {}
+
+    hypothesis = str(verdict.get("hypothesis", "") or "")
+    evidence   = str(verdict.get("evidence", "") or "")
     print(f"  Hypothesis: {hypothesis}")
     print(f"  Evidence:   {evidence[:120]}...\n")
 
     # ------------------------------------------------------------------
     # Call 2: Craft a biasing system prompt
     # ------------------------------------------------------------------
-    print("Asking judge to craft a biasing system prompt...")
+    print(f"Asking judge ({args.judge_model}) to craft a biasing system prompt...")
     sp_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         hypothesis=hypothesis, evidence=evidence
     )
-    system_prompt = call_openai(api_key, args.judge_model,
-                                [{"role": "user", "content": sp_prompt}],
-                                max_tokens=500)
+    system_prompt = call_llm(
+        client_or_key=client,
+        provider=provider,
+        model=args.judge_model,
+        prompt=sp_prompt,
+        temperature=0.0,
+        max_tokens=500,
+    )
     print(f"  System prompt: {system_prompt[:120]}...\n")
 
     # ------------------------------------------------------------------
@@ -211,6 +223,7 @@ def main():
         "seed": args.seed,
         "model": args.model,
         "judge_model": args.judge_model,
+        "judge_provider": provider,
         "hypothesis": hypothesis,
         "evidence": evidence,
         "system_prompt": system_prompt,
