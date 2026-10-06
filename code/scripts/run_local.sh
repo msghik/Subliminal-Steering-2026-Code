@@ -103,20 +103,42 @@ GPU="${GPU:-0}"
 PROMPT_MODE="${PROMPT_MODE:-animal}"
 KL_BETA="${KL_BETA:-0}"
 NO_HUB="${NO_HUB:-}"
-PASS_RATE_LOW="${PASS_RATE_LOW:-0.10}"
-PASS_RATE_HIGH="${PASS_RATE_HIGH:-0.35}"
+# Pass-rate bounds: default to 0.50-0.70 for full_ft/sgd_lora, 0.10-0.35 for adam_lora
+if [[ -z "${PASS_RATE_LOW:-}" ]]; then
+  case "${RUN}" in
+    sgd_lora|full_ft) PASS_RATE_LOW="0.50" ;;
+    *)                PASS_RATE_LOW="0.10" ;;
+  esac
+fi
+if [[ -z "${PASS_RATE_HIGH:-}" ]]; then
+  case "${RUN}" in
+    sgd_lora|full_ft) PASS_RATE_HIGH="0.70" ;;
+    *)                PASS_RATE_HIGH="0.35" ;;
+  esac
+fi
 
 # Condition resolution: METHOD, OPTIMIZER, LR
 case "${RUN}" in
   adam_lora)
     METHOD="lora"
     OPTIMIZER="adamw"
-    LR="${LR:-2e-4}"
+    if [[ -z "${LR:-}" ]]; then
+      case "${MODEL}" in
+        *Llama-3.2-3B*) LR="3e-4" ;;
+        *Phi-3-mini*)  LR="9e-4" ;;
+        *)              LR="2e-4" ;;
+      esac
+    fi
     ;;
   sgd_lora)
     METHOD="lora"
     OPTIMIZER="sgd"
-    LR="${LR:-3e-1}"
+    if [[ -z "${LR:-}" ]]; then
+      case "${MODEL}" in
+        *deepseek*|*DeepSeek*) LR="1e0" ;;
+        *)                     LR="3e-1" ;;
+      esac
+    fi
     ;;
   full_ft)
     METHOD="full_ft"
@@ -126,7 +148,13 @@ case "${RUN}" in
   prompted)
     METHOD="lora"
     OPTIMIZER="adamw"
-    LR="${LR:-2e-4}"
+    if [[ -z "${LR:-}" ]]; then
+      case "${MODEL}" in
+        *Llama-3.2-3B*) LR="3e-4" ;;
+        *Phi-3-mini*)  LR="9e-4" ;;
+        *)              LR="2e-4" ;;
+      esac
+    fi
     ;;
   *)
     echo "ERROR: Unknown RUN '${RUN}'. Must be one of: adam_lora, sgd_lora, full_ft, prompted"
@@ -321,12 +349,12 @@ echo "============================================================"
 echo " PIPELINE COMPLETE: ${TOPIC} (gens 1..${NUM_GENERATIONS})"
 echo "============================================================"
 
-if [[ "${RUN}" != "prompted" ]]; then
-  echo ">>> Plotting decay curve:"
-  $PY "${SRC}/plot_decay.py" \
-    --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
-    --data-root "${DATA_ROOT}" --num-generations "${NUM_GENERATIONS}"
+echo ">>> Plotting decay curve:"
+$PY "${SRC}/plot_decay.py" \
+  --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
+  --data-root "${DATA_ROOT}" --num-generations "${NUM_GENERATIONS}"
 
+if [[ "${RUN}" != "prompted" ]]; then
   echo ">>> Per-run drift / layer-window analysis"
   $PY "${SRC}/analyze_decay.py" \
     --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \

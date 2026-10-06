@@ -34,6 +34,7 @@ HF_USERNAME="HFUSERNAME_PLACEHOLDER"
 HF_TAG="HFTAG_PLACEHOLDER"
 NUM_GENERATIONS="NUMGENS_PLACEHOLDER"
 STEPS="STEPS_PLACEHOLDER"
+LR="LR_PLACEHOLDER"
 
 export HF_HOME="HFCACHE_PLACEHOLDER"
 export HF_DATASETS_CACHE="HFCACHE_PLACEHOLDER/datasets"
@@ -95,6 +96,7 @@ if should_run 2; then
     --max-samples ${DATASET_SIZE}     \
     --lora-r      ${LORA_R}           \
     --lora-alpha  ${LORA_ALPHA}       \
+    --lr          "${LR}"             \
     ${NO_WANDB}
   echo "✓ Finetune done ($(date))"
 else
@@ -174,6 +176,7 @@ if [[ "${NUM_GENERATIONS}" -gt 1 ]]; then
       --max-samples ${DATASET_SIZE}     \
       --lora-r      ${LORA_R}           \
       --lora-alpha  ${LORA_ALPHA}       \
+      --lr          "${LR}"             \
       ${NO_WANDB}
     echo "✓ Gen ${GEN} finetune done ($(date))"
 
