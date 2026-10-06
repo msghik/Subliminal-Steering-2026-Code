@@ -465,6 +465,58 @@ if [[ "${NUM_GENERATIONS}" -gt 1 ]]; then
       --reference-vector-path "${GEN1_VECTOR}"
     echo "✓ Gen ${GEN} recovery done ($(date))"
 
+    # --- E. Probe recovered vector at multiple alphas (optional) ----------
+    if should_run 7; then
+      echo ""
+      echo "------------------------------------------------------------"
+      echo " GEN ${GEN} STEP E — PROBE RECOVERED VECTOR  ($(date))"
+      echo "------------------------------------------------------------"
+      ${VENV} ${CODE_DIR}/src/probe_recovered_vector.py \
+        --model     "${MODEL}"     \
+        --topic     "${TOPIC}"     \
+        --seed      ${SEED}        \
+        --gen       ${GEN}         \
+        --data-root "${DATA_ROOT}"
+      echo "✓ Gen ${GEN} probe vector done ($(date))"
+    fi
+
+    # --- F. Identify Bias via LLM Synthesizer (optional) ------------------
+    if should_run 8; then
+      echo ""
+      echo "------------------------------------------------------------"
+      echo " GEN ${GEN} STEP F — IDENTIFY BIAS  ($(date))"
+      echo "------------------------------------------------------------"
+      if ! ${VENV} ${CODE_DIR}/src/identify_bias.py \
+        --model      "${MODEL}"     \
+        --topic      "${TOPIC}"     \
+        --seed       ${SEED}        \
+        --gen        ${GEN}         \
+        --data-root  "${DATA_ROOT}"; then
+        echo "⚠ WARNING: Gen ${GEN} Step 8 (Identify Bias) failed. Continuing pipeline..."
+      else
+        echo "✓ Gen ${GEN} Identify Bias done ($(date))"
+      fi
+    fi
+
+    # --- G. Score Hypothesis via LLM Judge (optional) ---------------------
+    if should_run 9; then
+      echo ""
+      echo "------------------------------------------------------------"
+      echo " GEN ${GEN} STEP G — SCORE HYPOTHESIS  ($(date))"
+      echo "------------------------------------------------------------"
+      if ! ${VENV} ${CODE_DIR}/src/score_hypothesis.py \
+        --model        "${MODEL}"        \
+        --topic        "${TOPIC}"        \
+        --seed         ${SEED}           \
+        --gen          ${GEN}            \
+        --data-root    "${DATA_ROOT}"    \
+        --prompts-json "${PROMPTS_JSON}"; then
+        echo "⚠ WARNING: Gen ${GEN} Step 9 (Score Hypothesis) failed. Continuing pipeline..."
+      else
+        echo "✓ Gen ${GEN} Score Hypothesis done ($(date))"
+      fi
+    fi
+
     echo ""
     echo "============================================================"
     echo " GENERATION ${GEN} COMPLETE  ($(date))"

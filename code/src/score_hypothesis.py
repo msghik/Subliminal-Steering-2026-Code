@@ -42,6 +42,8 @@ def parse_args():
                    help="OpenAI model to use as scorer")
     p.add_argument("--openai-key",   type=str, default=None,
                    help="OpenAI API key (falls back to OPENAI_API_KEY env var)")
+    p.add_argument("--gen",          type=int, default=1,
+                   help="Generation index (>=1). 1 = seed root; >=2 reads/writes under seed/gen_{N}/")
     return p.parse_args()
 
 
@@ -104,7 +106,8 @@ def main():
 
     model_name  = args.model.split("/")[-1]
     seed_dir    = os.path.join(args.data_root, model_name, args.topic, f"seed_{args.seed}")
-    results_dir = os.path.join(seed_dir, "results")
+    gen_dir     = seed_dir if args.gen <= 1 else os.path.join(seed_dir, f"gen_{args.gen}")
+    results_dir = os.path.join(gen_dir, "results")
     judge_path  = os.path.join(results_dir, "judge.json")
     out_path    = os.path.join(results_dir, "judge2.json")
     os.makedirs(results_dir, exist_ok=True)

@@ -60,6 +60,8 @@ def parse_args():
     p.add_argument("--batch-size",  type=int,   default=10)
     p.add_argument("--max-tokens",  type=int,   default=20)
     p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--gen",         type=int,   default=1,
+                   help="Generation index (>=1). 1 = seed root; >=2 reads/writes under seed/gen_{N}/")
     return p.parse_args()
 
 # =============================================================================
@@ -85,9 +87,9 @@ def main():
 
     model_name   = args.model.split('/')[-1]
     seed_dir     = os.path.join(args.data_root, model_name, args.topic, f"seed_{args.seed}")
-    sv_path      = os.path.join(seed_dir, "Recover_Vector",
-                                "student_steering_vector.pkl")
-    results_dir  = os.path.join(seed_dir, "results")
+    gen_dir      = seed_dir if args.gen <= 1 else os.path.join(seed_dir, f"gen_{args.gen}")
+    sv_path      = os.path.join(gen_dir, "Recover_Vector", "student_steering_vector.pkl")
+    results_dir  = os.path.join(gen_dir, "results")
     out_path     = os.path.join(results_dir, "recover_responses.json")
     os.makedirs(results_dir, exist_ok=True)
 

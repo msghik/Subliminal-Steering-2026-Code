@@ -103,6 +103,7 @@ GPU="${GPU:-0}"
 PROMPT_MODE="${PROMPT_MODE:-animal}"
 KL_BETA="${KL_BETA:-0}"
 NO_HUB="${NO_HUB:-}"
+RUN_OPENAI_JUDGE="${RUN_OPENAI_JUDGE:-false}"
 # Pass-rate bounds: default to 0.50-0.70 for full_ft/sgd_lora, 0.10-0.35 for adam_lora
 if [[ -z "${PASS_RATE_LOW:-}" ]]; then
   case "${RUN}" in
@@ -292,6 +293,19 @@ else
   $PY "${SRC}/recovery.py" \
     --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
     --epochs "${RC_EPOCHS}" --num-train-samples "${DATASET_SIZE}"
+
+  if [[ "${RUN_OPENAI_JUDGE}" == "true" ]]; then
+    echo ">>> GEN 1 / step 7: probe recovered vector"
+    $PY "${SRC}/probe_recovered_vector.py" \
+      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}"
+    echo ">>> GEN 1 / step 8: identify bias via LLM synthesizer"
+    $PY "${SRC}/identify_bias.py" \
+      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}"
+    echo ">>> GEN 1 / step 9: score hypothesis via LLM judge"
+    $PY "${SRC}/score_hypothesis.py" \
+      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
+      --prompts-json "${PROMPTS_JSON}"
+  fi
 fi
 
 # ===========================================================================
@@ -341,6 +355,19 @@ for (( G=2; G<=NUM_GENERATIONS; G++ )); do
       --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
       --data-root "${DATA_ROOT}" --epochs "${RC_EPOCHS}" --num-train-samples "${DATASET_SIZE}" \
       --reference-vector-path "${REF_VECTOR}"
+
+    if [[ "${RUN_OPENAI_JUDGE}" == "true" ]]; then
+      echo ">>> GEN ${G} / E: probe recovered vector"
+      $PY "${SRC}/probe_recovered_vector.py" \
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}"
+      echo ">>> GEN ${G} / F: identify bias via LLM synthesizer"
+      $PY "${SRC}/identify_bias.py" \
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}"
+      echo ">>> GEN ${G} / G: score hypothesis via LLM judge"
+      $PY "${SRC}/score_hypothesis.py" \
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}" \
+        --prompts-json "${PROMPTS_JSON}"
+    fi
   fi
 done
 
