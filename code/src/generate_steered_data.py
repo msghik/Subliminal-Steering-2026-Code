@@ -36,6 +36,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
+from model_utils import is_peft_checkpoint, load_student
+
 
 # =============================================================================
 # Args
@@ -263,19 +265,18 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, device_map="auto", torch_dtype="auto"
-    )
-
-    # Optionally merge a prior-generation LoRA adapter onto the base.
-    # We merge so model.generate() runs the combined weights directly with no
-    # PEFT overhead and no steering hooks need to know about adapter wrappers.
+    # The previous generation's student is either a LoRA adapter (merged onto the
+    # base) or a full-parameter checkpoint (loaded directly). The format is
+    # inspected BEFORE any model is built, so a full_ft teacher never causes a
+    # redundant base-model load. We merge so model.generate() runs the combined
+    # weights directly with no PEFT overhead and no steering hooks need to know
+    # about adapter wrappers.
     if args.adapter:
-        print(f"Loading LoRA adapter and merging: {args.adapter}")
-        from peft import PeftModel
-        model = PeftModel.from_pretrained(model, args.adapter)
-        model = model.merge_and_unload()
-        print("✓ Adapter merged into base\n")
+        print(f"Loading previous-generation student: {args.adapter}")
+    model = load_student(args.model, args.adapter, device_map="auto", torch_dtype="auto")
+    if args.adapter:
+        kind = "LoRA adapter (merged onto base)" if is_peft_checkpoint(args.adapter) else "full-parameter checkpoint"
+        print(f"✓ Student loaded as {kind}\n")
 
     model.eval()
 

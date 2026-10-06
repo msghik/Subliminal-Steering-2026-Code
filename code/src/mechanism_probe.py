@@ -47,6 +47,8 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from model_utils import load_student
+
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -129,13 +131,6 @@ def load_base_hit_rate(seed_dir):
             d = json.load(f)
         return d.get("base_model", {}).get("hit_rate")
     return None
-
-
-def load_adapter(model, adapter_id):
-    """Merge a LoRA adapter into the model in-place; return merged model."""
-    from peft import PeftModel
-    model = PeftModel.from_pretrained(model, adapter_id)
-    return model.merge_and_unload()
 
 
 def adapter_id_for_gen(seed_dir, g):
@@ -327,28 +322,26 @@ def probe_generation(
     """Load the Gen-g student (if possible), run all three probes, return result dict."""
     print(f"\n  ── Gen {g} " + "─" * 50)
 
-    # Load adapter id from ft_eval.json
+    # Load the student's checkpoint reference (Hub repo or local dir) from ft_eval.json
     adapter_id = adapter_id_for_gen(seed_dir, g)
-    if adapter_id is None and g > 1:
-        print(f"    ⚠ No adapter id found for gen {g} — skipping.")
+    if adapter_id is None:
+        # Never probe the base model in place of a missing student — that would
+        # record base-model numbers under this generation's label.
+        print(f"    ⚠ No checkpoint reference found for gen {g} — skipping.")
         return None
 
-    print(f"    Loading base model {model_name_full} ...")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name_full, device_map="auto", torch_dtype=torch.float16
-    )
+    # Student may be a LoRA adapter (merged onto the base) or a full-parameter
+    # checkpoint (loaded directly). Detection happens before any model is built,
+    # and any loading error propagates — there is deliberately NO fallback.
+    print(f"    Loading Gen-{g} student {adapter_id} (base: {model_name_full}) ...")
+    model = load_student(model_name_full, adapter_id,
+                         device_map="auto", torch_dtype=torch.float16)
     tokenizer = AutoTokenizer.from_pretrained(
         model_name_full, use_fast=True, padding_side="left"
     )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    if adapter_id is not None:
-        print(f"    Merging adapter {adapter_id} ...")
-        try:
-            model = load_adapter(model, adapter_id)
-        except Exception as e:
-            print(f"    ⚠ Could not load adapter: {e}. Running base model as fallback.")
     model.eval()
     for p in model.parameters():
         p.requires_grad = False
@@ -570,13 +563,16 @@ def main():
           f"{'drop':>8}  {'causal%':>8}  {'vr_cos':>8}")
     for r in all_results:
         cf = r["causal_fraction"]
+        cf_str  = "—".rjust(8) if cf is None else f"{cf * 100:.1f}%".rjust(8)
+        cos_val = r["vr_cosine_to_vc"]
+        cos_str = "—".rjust(8) if cos_val is None else f"{cos_val:.4f}".rjust(8)
         print(
             f"  {r['generation']:>3}  "
             f"{r['hit_rate_normal']:>10.4f}  "
             f"{r['hit_rate_ablated']:>10.4f}  "
             f"{r['ablation_drop']:>+8.4f}  "
-            f"{'—'.rjust(8) if cf is None else f'{cf*100:.1f}%'.rjust(8)}  "
-            f"{'—'.rjust(8) if r['vr_cosine_to_vc'] is None else f\"{r['vr_cosine_to_vc']:.4f}\".rjust(8)}"
+            f"{cf_str}  "
+            f"{cos_str}"
         )
     print("=" * 70)
 

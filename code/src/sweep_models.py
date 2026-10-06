@@ -43,6 +43,8 @@ def parse_args():
     p.add_argument("--topics",  nargs="+", required=True)
     p.add_argument("--seeds",   nargs="+", type=int, default=[42, 43, 44])
     p.add_argument("--data-root", required=True)
+    p.add_argument("--run",       type=str, default=None,
+                   help="Condition subfolder under data-root (e.g. adam_lora, sgd_lora, full_ft)")
     return p.parse_args()
 
 
@@ -88,10 +90,34 @@ def layer_fraction_energy(probe_data, gen, num_layers):
     return None
 
 
+def fit_halflife(gens, mean_hrs, base_hr):
+    if base_hr is None:
+        return None, None
+    pairs = [(g, hr - base_hr) for g, hr in zip(gens, mean_hrs)
+             if hr is not None and hr - base_hr > 0]
+    if len(pairs) < 2:
+        return None, None
+    xs = [g - 1 for g, _ in pairs]
+    ys = [math.log(ex) for _, ex in pairs]
+    n  = len(xs)
+    sx, sy = sum(xs), sum(ys)
+    sxx = sum(x*x for x in xs)
+    sxy = sum(x*y for x, y in zip(xs, ys))
+    denom = n*sxx - sx*sx
+    if denom == 0:
+        return None, None
+    k_neg = (n*sxy - sx*sy) / denom
+    k = -k_neg
+    hl = math.log(2) / k if k > 0 else None
+    return k, hl
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
     args = parse_args()
+    if args.run and not args.data_root.endswith(args.run):
+        args.data_root = os.path.join(args.data_root, args.run)
     out_dir = os.path.join(args.data_root, "cross_model")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -116,31 +142,6 @@ def main():
                 model_records[ms][topic] = d
             else:
                 print(f"  ⚠ {ms}/{topic}: multi-seed JSON not found, skipping.")
-
-    # ── Extract half-life per (model, topic) ─────────────────────────────────
-    # The multi_seed.json doesn't store half-life directly — we recompute
-    # from the mean hit-rate series using the same exponential fit as aggregate_seeds.py.
-
-    def fit_halflife(gens, mean_hrs, base_hr):
-        if base_hr is None:
-            return None, None
-        pairs = [(g, hr - base_hr) for g, hr in zip(gens, mean_hrs)
-                 if hr is not None and hr - base_hr > 0]
-        if len(pairs) < 2:
-            return None, None
-        xs = [g - 1 for g, _ in pairs]
-        ys = [math.log(ex) for _, ex in pairs]
-        n  = len(xs)
-        sx, sy = sum(xs), sum(ys)
-        sxx = sum(x*x for x in xs)
-        sxy = sum(x*y for x, y in zip(xs, ys))
-        denom = n*sxx - sx*sx
-        if denom == 0:
-            return None, None
-        k_neg = (n*sxy - sx*sy) / denom
-        k = -k_neg
-        hl = math.log(2) / k if k > 0 else None
-        return k, hl
 
     summary = []   # for JSON output
 

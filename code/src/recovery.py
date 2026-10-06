@@ -1,7 +1,7 @@
 """
 recovery.py — Blind recovery: learn steering vector + alpha + contiguous layer window.
 
-Pipeline step 7/10.  10 epochs.  Starts with ALL layers open (no prior knowledge).
+Pipeline step 6/10.  10 epochs.  Starts with ALL layers open (no prior knowledge).
 
 Reads:  DATA_ROOT/{model_name}/{topic}/seed_{seed}/Data/filtered.jsonl
        DATA_ROOT/{model_name}/{topic}/seed_{seed}/Steering_Vector/steering_vector.pkl  (teacher ref only)
@@ -273,7 +273,7 @@ def main():
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     print("=" * 70)
-    print("STEP 7/10 — RECOVERY (blind: vector + alpha + layer window)")
+    print("STEP 6/10 — RECOVERY (blind: vector + alpha + layer window)")
     print("=" * 70)
     print(f"  Model:      {args.model}")
     print(f"  Topic:      {args.topic}")
@@ -542,20 +542,16 @@ def main():
         json.dump(run_summary, f, indent=2)
     print(f"✓ rc_eval.json saved to {results_dir}")
 
-    # Per-generation artefacts (one file per gen, never overwritten).
+    # Per-generation artefacts (one file per gen).
     vr_path  = os.path.join(output_dir, f"vr_gen{args.gen}.pt")
     rcg_path = os.path.join(results_dir, f"rc_eval_gen{args.gen}.json")
-    if not os.path.exists(vr_path):
-        torch.save(sv_f, vr_path)
-        print(f"✓ vr_gen{args.gen}.pt → {vr_path}")
-    else:
-        print(f"  vr_gen{args.gen}.pt already exists, skipping.")
-    if not os.path.exists(rcg_path):
-        with open(rcg_path, 'w') as f:
-            json.dump(run_summary, f, indent=2)
-        print(f"✓ rc_eval_gen{args.gen}.json → {rcg_path}")
-    else:
-        print(f"  rc_eval_gen{args.gen}.json already exists, skipping.")
+    # Always overwrite: a stale file from an earlier run (e.g. a 1-epoch --trial)
+    # must never shadow the vector from a real recovery run.
+    torch.save(sv_f, vr_path)
+    print(f"✓ vr_gen{args.gen}.pt → {vr_path}")
+    with open(rcg_path, 'w') as f:
+        json.dump(run_summary, f, indent=2)
+    print(f"✓ rc_eval_gen{args.gen}.json → {rcg_path}")
 
     with open(os.path.join(output_dir, "training_logs.json"), 'w') as f:
         json.dump(tracker.log_entries, f, indent=2)

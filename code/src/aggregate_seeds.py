@@ -38,6 +38,8 @@ def parse_args():
     p.add_argument("--seeds",           nargs="+", type=int, default=[42, 43, 44])
     p.add_argument("--data-root",       required=True)
     p.add_argument("--num-generations", type=int, default=None)
+    p.add_argument("--run",             type=str, default=None,
+                   help="Condition subfolder under data-root (e.g. adam_lora, sgd_lora, full_ft)")
     return p.parse_args()
 
 
@@ -179,6 +181,8 @@ def aggregate(topic_data):
 
 def main():
     args = parse_args()
+    if args.run and not args.data_root.endswith(args.run):
+        args.data_root = os.path.join(args.data_root, args.run)
     model_name = args.model.split("/")[-1]
     analysis_out = os.path.join(args.data_root, model_name, "analysis")
     os.makedirs(analysis_out, exist_ok=True)

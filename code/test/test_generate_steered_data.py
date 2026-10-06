@@ -5,7 +5,15 @@ import os
 # Add src to the path to make importing easier
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+for mod in ["torch", "transformers", "peft", "numpy", "tqdm", "datasets"]:
+    if mod not in sys.modules:
+        try:
+            __import__(mod)
+        except ImportError:
+            sys.modules[mod] = MagicMock()
+
 from generate_steered_data import (
     extract_three_digit_numbers_consistent_sep,
     validate_completion

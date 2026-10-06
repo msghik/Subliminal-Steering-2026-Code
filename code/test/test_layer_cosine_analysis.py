@@ -1,13 +1,23 @@
 import unittest
-import torch
+
+try:
+    import torch
+    has_real_torch = hasattr(torch, "tensor") and not type(torch).__name__.startswith("MagicMock")
+except Exception:
+    has_real_torch = False
+
 import sys
 import os
 
 # Add src to the path to make importing easier
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 
-from layer_cosine_analysis import compute_deltas
+if has_real_torch:
+    from layer_cosine_analysis import compute_deltas
+else:
+    compute_deltas = None
 
+@unittest.skipUnless(has_real_torch, "torch not installed")
 class TestComputeDeltas(unittest.TestCase):
 
     def test_happy_path_mathematical_correctness(self):

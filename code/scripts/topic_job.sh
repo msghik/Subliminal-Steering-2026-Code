@@ -2,11 +2,13 @@
 #SBATCH --gpus=1
 #SBATCH --time=48:00:00
 #SBATCH --mem=80G
-#SBATCH --job-name=pipeline_TOPIC
-#SBATCH --output=LOGDIR/pipeline_%j.out
-#SBATCH --error=LOGDIR/pipeline_%j.err
+#SBATCH --job-name=JOBNAME_PLACEHOLDER
+#SBATCH --output=LOGDIR/JOBNAME_PLACEHOLDER_%j.out
+#SBATCH --error=LOGDIR/JOBNAME_PLACEHOLDER_%j.err
 
 set -euo pipefail
+
+echo "SLURM node: ${SLURM_JOB_NODELIST:-$(hostname)}  |  job ${SLURM_JOB_ID:-unknown}"
 
 # Redirect HF cache to scratch (home quota is tiny)
 export HF_HOME="HFCACHE_PLACEHOLDER"
@@ -28,11 +30,19 @@ FINETUNE_EPOCHS="FINETUNEEPOCHS_PLACEHOLDER"
 RECOVERY_EPOCHS="RECOVERYEPOCHS_PLACEHOLDER"
 LORA_R="LORAR_PLACEHOLDER"
 LORA_ALPHA="LORAALPHA_PLACEHOLDER"
+LR="LR_PLACEHOLDER"
+METHOD="METHOD_PLACEHOLDER"
+OPTIMIZER="OPTIMIZER_PLACEHOLDER"
+KL_BETA="KLBETA_PLACEHOLDER"
+NO_HUB="NOHUB_PLACEHOLDER"
 PROMPT_COUNT="PROMPTCOUNT_PLACEHOLDER"
 MAX_NEW_TOKENS="MAXNEWTOKENS_PLACEHOLDER"
 PROMPTS_JSON="PROMPTSJSON_PLACEHOLDER"
 HF_USERNAME="HFUSERNAME_PLACEHOLDER"
 NUM_GENERATIONS="NUMGENS_PLACEHOLDER"
+HF_TAG="HFTAG_PLACEHOLDER"      # namespaces Hub repo names per --run condition
+PASS_RATE_LOW="PASSRATELOW_PLACEHOLDER"
+PASS_RATE_HIGH="PASSRATEHIGH_PLACEHOLDER"
 
 # Comma-separated list of steps to run, e.g. "1,2,3,4,5,6,7,8,9,10" or "3" or "5,6,7"
 STEPS="STEPS_PLACEHOLDER"
@@ -50,7 +60,7 @@ should_run() {
 }
 
 echo "============================================================"
-echo " PIPELINE START: ${TOPIC}  |  seed=${SEED}"
+echo " PIPELINE START: ${TOPIC}  |  seed=${SEED}  |  method=${METHOD}$( [[ "${METHOD}" == "lora" ]] && echo "/${OPTIMIZER}" )"
 echo " Steps to run:   ${STEPS}"
 echo " $(date)"
 echo "============================================================"
@@ -83,10 +93,12 @@ if should_run 2; then
   echo " STEP 2/10 — ALPHA SEARCH  ($(date))"
   echo "------------------------------------------------------------"
   ${VENV} ${CODE_DIR}/src/alpha_search.py \
-    --model      "${MODEL}"     \
-    --topic      "${TOPIC}"     \
-    --seed       ${SEED}        \
-    --data-root  "${DATA_ROOT}"
+    --model       "${MODEL}"           \
+    --topic       "${TOPIC}"           \
+    --seed        ${SEED}              \
+    --data-root   "${DATA_ROOT}"       \
+    --target-low  ${PASS_RATE_LOW}  \
+    --target-high ${PASS_RATE_HIGH}
   echo "✓ Alpha Search done ($(date))"
 else
   echo " STEP 2/10 — ALPHA SEARCH  [SKIPPED]"
@@ -104,6 +116,14 @@ if [[ -f "${ALPHA_FILE}" ]]; then
 else
   ALPHA=""
   echo "  ⚠ No alpha_search_result.json yet (steps 1-2 may not have run)"
+fi
+
+# When method=full_ft --no-hub, steps 5 and 10 load from a local checkpoint
+# directory instead of the HF Hub.
+if [[ "${METHOD}" == "full_ft" ]] && [[ "${NO_HUB}" == "--no-hub" ]]; then
+  FT_MODEL="${SEED_DIR}/model_final"
+else
+  FT_MODEL="${HF_REPO}"
 fi
 
 # =============================================================================
@@ -136,19 +156,36 @@ fi
 if should_run 4; then
   echo ""
   echo "------------------------------------------------------------"
-  echo " STEP 4/10 — FINETUNE  ($(date))"
+  echo " STEP 4/10 — FINETUNE [${METHOD}$( [[ "${METHOD}" == "lora" ]] && echo "/${OPTIMIZER}" )]  ($(date))"
   echo "------------------------------------------------------------"
-  ${VENV} ${CODE_DIR}/src/finetune.py \
-    --model      "${MODEL}"     \
-    --topic      "${TOPIC}"     \
-    --seed       ${SEED}        \
-    --data-root  "${DATA_ROOT}" \
-    --hf-repo    "${HF_REPO}"   \
-    --epochs     ${FINETUNE_EPOCHS} \
-    --max-samples ${DATASET_SIZE}   \
-    --lora-r     ${LORA_R}          \
-    --lora-alpha ${LORA_ALPHA}      \
-    ${NO_WANDB}
+  if [[ "${METHOD}" == "full_ft" ]]; then
+    ${VENV} ${CODE_DIR}/src/finetune_full_ft.py \
+      --model      "${MODEL}"     \
+      --topic      "${TOPIC}"     \
+      --seed       ${SEED}        \
+      --data-root  "${DATA_ROOT}" \
+      --hf-repo    "${HF_REPO}"   \
+      --epochs     ${FINETUNE_EPOCHS} \
+      --max-samples ${DATASET_SIZE}   \
+      --lr         ${LR}              \
+      --beta       ${KL_BETA}         \
+      ${NO_HUB}                       \
+      ${NO_WANDB}
+  else
+    ${VENV} ${CODE_DIR}/src/finetune.py \
+      --model      "${MODEL}"     \
+      --topic      "${TOPIC}"     \
+      --seed       ${SEED}        \
+      --data-root  "${DATA_ROOT}" \
+      --hf-repo    "${HF_REPO}"   \
+      --epochs     ${FINETUNE_EPOCHS} \
+      --max-samples ${DATASET_SIZE}   \
+      --lora-r     ${LORA_R}          \
+      --lora-alpha ${LORA_ALPHA}      \
+      --lr         ${LR}              \
+      --optimizer  ${OPTIMIZER}       \
+      ${NO_WANDB}
+  fi
   echo "✓ Finetune done ($(date))"
   # NOTE: do NOT flush_hf_cache here — step 5 needs the same model
 else
@@ -156,7 +193,7 @@ else
 fi
 
 # =============================================================================
-# Step 5: Eval Finetune — base vs adapter evaluation
+# Step 5: Eval Finetune — base vs finetuned model/adapter evaluation
 # =============================================================================
 if should_run 5; then
   echo ""
@@ -169,8 +206,15 @@ if should_run 5; then
     --seed         ${SEED}           \
     --data-root    "${DATA_ROOT}"    \
     --prompts-json "${PROMPTS_JSON}" \
-    --hf-repo      "${HF_REPO}"
+    --hf-repo      "${FT_MODEL}"
   echo "✓ Eval Finetune done ($(date))"
+  # Local full_ft checkpoints are large — clean up once nothing later in this
+  # run still needs them (step 10 also reads FT_MODEL, so wait for it if scheduled).
+  # MULTI-GEN: never delete — Gen 1's checkpoint is the teacher for Gen 2.
+  if [[ "${METHOD}" == "full_ft" ]] && [[ "${NO_HUB}" == "--no-hub" ]] && [[ "${NUM_GENERATIONS}" -le 1 ]] && ! should_run 10 && [[ -d "${FT_MODEL}" ]]; then
+    rm -rf "${FT_MODEL}"
+    echo "✓ Deleted local model: ${FT_MODEL}"
+  fi
 else
   echo " STEP 5/10 — EVAL FINETUNE  [SKIPPED]"
 fi
@@ -263,8 +307,13 @@ if should_run 10; then
     --topic      "${TOPIC}"     \
     --seed       ${SEED}        \
     --data-root  "${DATA_ROOT}" \
-    --hf-repo    "${HF_REPO}"
+    --hf-repo    "${FT_MODEL}"
   echo "✓ Layer Cosine Analysis done ($(date))"
+  # MULTI-GEN: never delete — Gen 1's checkpoint is the teacher for Gen 2.
+  if [[ "${METHOD}" == "full_ft" ]] && [[ "${NO_HUB}" == "--no-hub" ]] && [[ "${NUM_GENERATIONS}" -le 1 ]] && [[ -d "${FT_MODEL}" ]]; then
+    rm -rf "${FT_MODEL}"
+    echo "✓ Deleted local model: ${FT_MODEL}"
+  fi
 else
   echo " STEP 10/10 — LAYER COSINE ANALYSIS  [SKIPPED]"
 fi
@@ -277,32 +326,50 @@ echo "============================================================"
 # =============================================================================
 # Generational loop (gens 2..NUM_GENERATIONS): pure-inheritance bias decay
 #
-# For each gen k >= 2:
-#   A. Inherited data generation — Gen-(k-1) student (LoRA on original base)
-#      produces completions on the same random-number prompts with no steering
-#      vector and no biased system prompt. Only the student's weights carry
-#      bias forward.
-#   B. Fresh-base LoRA fine-tune on Gen-(k-1)'s inherited data → Gen-k adapter.
-#   C. Eval Gen-k adapter (hit-rate + log-lik) against the same prompts.json.
+# For each gen k >= 2 (SAME --run method/optimizer/LR as Gen 1 — adam_lora,
+# sgd_lora or full_ft — so the condition never silently changes mid-chain):
+#   A. Inherited data generation — Gen-(k-1) student (LoRA adapter OR full
+#      checkpoint, auto-detected) produces completions on the same random-number
+#      prompts with no steering vector and no biased system prompt. Only the
+#      student's weights carry bias forward.
+#   B. Fresh-base fine-tune on Gen-(k-1)'s inherited data → Gen-k student.
+#   C. Eval Gen-k student (hit-rate + log-lik) against the same prompts.json.
 #   D. Recovery on Gen-k data, cosine-compared against the ORIGINAL Gen-1 v_c.
 #
-# Adapter is fresh each generation; only the data carries bias forward.
+# The student is always trained from a FRESH copy of the base model; only the
+# data carries bias forward (KL regularisation in full_ft anchors to the base
+# model, never to the previous student).
 # =============================================================================
 if [[ "${NUM_GENERATIONS}" -gt 1 ]]; then
   GEN1_HF_REPO="${HF_REPO}"
   GEN1_VECTOR="${SEED_DIR}/Steering_Vector/steering_vector.pkl"
+
+  # full_ft + --no-hub keeps every generation's checkpoint on local disk.
+  LOCAL_MODELS=false
+  if [[ "${METHOD}" == "full_ft" ]] && [[ "${NO_HUB}" == "--no-hub" ]]; then LOCAL_MODELS=true; fi
+  HF_PREFIX="${HF_USERNAME:+${HF_USERNAME}/}"
+
+  # Hub repo name (or run tag, under --no-hub) for generation $1 (>= 2).
+  gen_repo_name() { echo "${HF_PREFIX}${MODEL_SHORTNAME}-${HF_TAG}-gen$1-ft${FINETUNE_EPOCHS}.${SEED}"; }
+
+  # What to hand to --adapter / --hf-repo to LOAD generation $1's student.
+  gen_model_ref() {
+    if ${LOCAL_MODELS}; then
+      if [[ $1 -eq 1 ]]; then echo "${SEED_DIR}/model_final"; else echo "${SEED_DIR}/gen_$1/model_final"; fi
+    else
+      if [[ $1 -eq 1 ]]; then echo "${GEN1_HF_REPO}"; else gen_repo_name "$1"; fi
+    fi
+  }
+
   for (( GEN=2; GEN<=NUM_GENERATIONS; GEN++ )); do
     PREV=$((GEN-1))
-    if [[ ${PREV} -eq 1 ]]; then
-      PREV_REPO="${GEN1_HF_REPO}"
-    else
-      PREV_REPO="${HF_USERNAME}/${MODEL_SHORTNAME}-${TOPIC}-gen${PREV}-ft${FINETUNE_EPOCHS}.${SEED}"
-    fi
-    GEN_REPO="${HF_USERNAME}/${MODEL_SHORTNAME}-${TOPIC}-gen${GEN}-ft${FINETUNE_EPOCHS}.${SEED}"
+    PREV_MODEL="$(gen_model_ref ${PREV})"
+    CURR_MODEL="$(gen_model_ref ${GEN})"
+    GEN_REPO="$(gen_repo_name ${GEN})"
 
     echo ""
     echo "============================================================"
-    echo " GENERATION ${GEN}/${NUM_GENERATIONS}  |  prev=${PREV_REPO}  ($(date))"
+    echo " GENERATION ${GEN}/${NUM_GENERATIONS}  |  teacher=${PREV_MODEL}  ($(date))"
     echo "============================================================"
 
     # --- A. Inherited data generation (no steering, no system prompt) -----
@@ -316,7 +383,7 @@ if [[ "${NUM_GENERATIONS}" -gt 1 ]]; then
       --seed          ${SEED}           \
       --gen           ${GEN}            \
       --no-steering                     \
-      --adapter       "${PREV_REPO}"    \
+      --adapter       "${PREV_MODEL}"   \
       --target-count  ${TARGET_COUNT}   \
       --batch-size    ${BATCH_SIZE}     \
       --answer-count  ${PROMPT_COUNT}   \
@@ -324,26 +391,44 @@ if [[ "${NUM_GENERATIONS}" -gt 1 ]]; then
       --data-root     "${DATA_ROOT}"
     echo "✓ Gen ${GEN} inherited data done ($(date))"
 
-    # --- B. Fresh-base LoRA fine-tune on inherited data -------------------
+    # --- B. Fresh-base fine-tune on inherited data (same method as Gen 1) --
     echo ""
     echo "------------------------------------------------------------"
-    echo " GEN ${GEN} STEP B — FINETUNE  ($(date))"
+    echo " GEN ${GEN} STEP B — FINETUNE [${METHOD}$( [[ "${METHOD}" == "lora" ]] && echo "/${OPTIMIZER}" )]  ($(date))"
     echo "------------------------------------------------------------"
-    ${VENV} ${CODE_DIR}/src/finetune.py \
-      --model      "${MODEL}"     \
-      --topic      "${TOPIC}"     \
-      --seed       ${SEED}        \
-      --gen        ${GEN}         \
-      --data-root  "${DATA_ROOT}" \
-      --hf-repo    "${GEN_REPO}"  \
-      --epochs     ${FINETUNE_EPOCHS} \
-      --max-samples ${DATASET_SIZE}   \
-      --lora-r     ${LORA_R}          \
-      --lora-alpha ${LORA_ALPHA}      \
-      ${NO_WANDB}
+    if [[ "${METHOD}" == "full_ft" ]]; then
+      ${VENV} ${CODE_DIR}/src/finetune_full_ft.py \
+        --model      "${MODEL}"     \
+        --topic      "${TOPIC}"     \
+        --seed       ${SEED}        \
+        --gen        ${GEN}         \
+        --data-root  "${DATA_ROOT}" \
+        --hf-repo    "${GEN_REPO}"  \
+        --epochs     ${FINETUNE_EPOCHS} \
+        --max-samples ${DATASET_SIZE}   \
+        --lr         ${LR}              \
+        --beta       ${KL_BETA}         \
+        ${NO_HUB}                       \
+        ${NO_WANDB}
+    else
+      ${VENV} ${CODE_DIR}/src/finetune.py \
+        --model      "${MODEL}"     \
+        --topic      "${TOPIC}"     \
+        --seed       ${SEED}        \
+        --gen        ${GEN}         \
+        --data-root  "${DATA_ROOT}" \
+        --hf-repo    "${GEN_REPO}"  \
+        --epochs     ${FINETUNE_EPOCHS} \
+        --max-samples ${DATASET_SIZE}   \
+        --lora-r     ${LORA_R}          \
+        --lora-alpha ${LORA_ALPHA}      \
+        --lr         ${LR}              \
+        --optimizer  ${OPTIMIZER}       \
+        ${NO_WANDB}
+    fi
     echo "✓ Gen ${GEN} finetune done ($(date))"
 
-    # --- C. Evaluate Gen-k adapter ----------------------------------------
+    # --- C. Evaluate Gen-k student ----------------------------------------
     echo ""
     echo "------------------------------------------------------------"
     echo " GEN ${GEN} STEP C — EVAL FINETUNE  ($(date))"
@@ -355,7 +440,7 @@ if [[ "${NUM_GENERATIONS}" -gt 1 ]]; then
       --gen          ${GEN}            \
       --data-root    "${DATA_ROOT}"    \
       --prompts-json "${PROMPTS_JSON}" \
-      --hf-repo      "${GEN_REPO}"
+      --hf-repo      "${CURR_MODEL}"
     echo "✓ Gen ${GEN} eval done ($(date))"
 
     # --- D. Recovery against ORIGINAL Gen-1 v_c ---------------------------
