@@ -99,9 +99,12 @@ def load_v_c(seed_dir):
         raise FileNotFoundError(f"Steering vector not found: {path}")
     with open(path, "rb") as f:
         d = pickle.load(f)
-    sv = d.get("steering_vector")
-    if sv is None:
-        raise KeyError("'steering_vector' key missing in pkl")
+    if "steering_vector" in d:
+        sv = d["steering_vector"]
+    elif "steering_vectors" in d:
+        sv = list(d["steering_vectors"].values())[0]
+    else:
+        raise KeyError("Neither 'steering_vector' nor 'steering_vectors' key found in pkl")
     if isinstance(sv, np.ndarray):
         sv = torch.from_numpy(sv)
     return sv.float()
