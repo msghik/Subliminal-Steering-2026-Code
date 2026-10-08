@@ -212,6 +212,13 @@ if [[ "${METHOD}" != "full_ft" ]] || [[ -z "${NO_HUB}" ]]; then
   export HF_TOKEN HF_USERNAME
 fi
 
+if [[ -n "${WANDB_API_KEY:-}" ]]; then
+  NO_WANDB=""
+  export WANDB_API_KEY
+else
+  NO_WANDB="--no-wandb"
+fi
+
 export CUDA_VISIBLE_DEVICES="${GPU}"
 
 MODEL_SHORT="${MODEL##*/}"
@@ -290,13 +297,13 @@ else
     $PY "${SRC}/finetune_full_ft.py" \
       --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
       --hf-repo "$(model_ref 1)" --epochs "${FT_EPOCHS}" --max-samples "${DATASET_SIZE}" \
-      --lr "${LR}" --beta "${KL_BETA}" ${NO_HUB} --no-wandb
+      --lr "${LR}" --beta "${KL_BETA}" ${NO_HUB} ${NO_WANDB}
   else
     $PY "${SRC}/finetune.py" \
       --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
       --hf-repo "$(model_ref 1)" --epochs "${FT_EPOCHS}" --max-samples "${DATASET_SIZE}" \
       --lora-r "${LORA_R}" --lora-alpha "${LORA_ALPHA}" --lr "${LR}" \
-      --optimizer "${OPTIMIZER}" --no-wandb
+      --optimizer "${OPTIMIZER}" ${NO_WANDB}
   fi
 
   echo ">>> GEN 1 / step 5: eval bias transfer"
@@ -352,13 +359,13 @@ for (( G=2; G<=NUM_GENERATIONS; G++ )); do
       --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
       --data-root "${DATA_ROOT}" --hf-repo "${STUDENT_REF}" --epochs "${FT_EPOCHS}" \
       --max-samples "${DATASET_SIZE}" --lr "${LR}" --beta "${KL_BETA}" \
-      ${NO_HUB} --no-wandb
+      ${NO_HUB} ${NO_WANDB}
   else
     $PY "${SRC}/finetune.py" \
       --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
       --data-root "${DATA_ROOT}" --hf-repo "${STUDENT_REF}" --epochs "${FT_EPOCHS}" \
       --max-samples "${DATASET_SIZE}" --lora-r "${LORA_R}" --lora-alpha "${LORA_ALPHA}" \
-      --lr "${LR}" --optimizer "${OPTIMIZER}" --no-wandb
+      --lr "${LR}" --optimizer "${OPTIMIZER}" ${NO_WANDB}
   fi
 
   echo ">>> GEN ${G} / C: eval"
