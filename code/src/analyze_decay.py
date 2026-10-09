@@ -61,7 +61,7 @@ def discover_max_gen(seed_dir):
 def load_vr(seed_dir, g):
     path = os.path.join(gen_dir(seed_dir, g), "Recover_Vector", f"vr_gen{g}.pt")
     if os.path.exists(path):
-        return torch.load(path, map_location="cpu").float()
+        return torch.load(path, map_location="cpu", weights_only=True).float()
     return None
 
 

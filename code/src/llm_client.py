@@ -17,6 +17,7 @@ Supports:
 import json
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -268,6 +269,21 @@ def call_gemini(
     return text.strip()
 
 
+_LAST_LLM_CALL_TIMESTAMP: float = 0.0
+
+
+def wait_between_requests(delay_seconds: float = 30.0):
+    """Ensure at least `delay_seconds` elapsed since the last LLM request."""
+    global _LAST_LLM_CALL_TIMESTAMP
+    now = time.time()
+    elapsed = now - _LAST_LLM_CALL_TIMESTAMP
+    if _LAST_LLM_CALL_TIMESTAMP > 0 and elapsed < delay_seconds:
+        wait_time = delay_seconds - elapsed
+        print(f"Waiting {wait_time:.1f}s between LLM requests to respect rate limits...")
+        time.sleep(wait_time)
+    _LAST_LLM_CALL_TIMESTAMP = time.time()
+
+
 def call_llm(
     client_or_key: Any,
     provider: str,
@@ -276,30 +292,56 @@ def call_llm(
     temperature: float = 0.0,
     max_tokens: Optional[int] = None,
     response_mime_type: Optional[str] = None,
-) -> str:
-    """Unified dispatch to either OpenAI or Google Gemini."""
-    if provider == "gemini":
-        return call_gemini(
-            client=client_or_key,
-            model=model,
-            prompt=prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_mime_type=response_mime_type,
-        )
-    elif provider == "openai":
-        messages = [{"role": "user", "content": prompt}]
-        tokens = max_tokens if max_tokens is not None else 1000
-        return call_openai(
-            api_key=client_or_key,
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=tokens,
-            response_mime_type=response_mime_type,
-        )
-    else:
-        raise ValueError(f"Unknown LLM provider: {provider}")
+    max_retries: int = 3,
+    retry_delay: float = 30.0,
+    request_interval: float = 30.0,
+) -> Optional[str]:
+    """Unified dispatch to either OpenAI or Google Gemini with rate limiting and retry logic.
+
+    - Sleeps between requests (default 30 seconds).
+    - Catches exceptions and retries up to 3 times (sleeping 30 seconds before each retry).
+    - If all retries fail, returns None (skip without crashing).
+    """
+    global _LAST_LLM_CALL_TIMESTAMP
+
+    for attempt in range(1, max_retries + 2):
+        wait_between_requests(request_interval)
+        try:
+            if provider == "gemini":
+                res = call_gemini(
+                    client=client_or_key,
+                    model=model,
+                    prompt=prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_mime_type=response_mime_type,
+                )
+            elif provider == "openai":
+                messages = [{"role": "user", "content": prompt}]
+                tokens = max_tokens if max_tokens is not None else 1000
+                res = call_openai(
+                    api_key=client_or_key,
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=tokens,
+                    response_mime_type=response_mime_type,
+                )
+            else:
+                raise ValueError(f"Unknown LLM provider: {provider}")
+
+            _LAST_LLM_CALL_TIMESTAMP = time.time()
+            return res
+        except Exception as e:
+            retries_left = (max_retries + 1) - attempt
+            print(f"⚠️ [Attempt {attempt}/{max_retries + 1}] LLM request failed with error: {e}")
+            if retries_left > 0:
+                print(f"   Sleeping {retry_delay}s before retry ({retries_left} retries left)...")
+                time.sleep(retry_delay)
+                _LAST_LLM_CALL_TIMESTAMP = time.time()
+            else:
+                print(f"❌ All {max_retries} retries failed for LLM request. Skipping.")
+                return None
 
 
 def clean_json_response(raw: str) -> str:

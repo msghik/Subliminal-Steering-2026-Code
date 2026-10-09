@@ -181,6 +181,25 @@ def main():
         response_mime_type="application/json",
     )
 
+    if not raw:
+        print("⚠️ Warning: Judge LLM call failed or was skipped after retries. Saving fallback judge.json.")
+        judge_output = {
+            "topic": args.topic,
+            "seed": args.seed,
+            "model": args.model,
+            "judge_model": args.judge_model,
+            "judge_provider": provider,
+            "hypothesis": "",
+            "evidence": "",
+            "system_prompt": "",
+            "skipped": True,
+            "reason": "LLM call failed or exhausted retries",
+        }
+        with open(judge_path, "w") as f:
+            json.dump(judge_output, f, indent=2)
+        print(f"  Saved fallback output to: {judge_path}")
+        return
+
     cleaned = clean_json_response(raw)
     try:
         verdict = json.loads(cleaned)
@@ -199,21 +218,27 @@ def main():
     print(f"  Evidence:   {evidence[:120]}...\n")
 
     # ------------------------------------------------------------------
-    # Call 2: Craft a biasing system prompt
+    # Call 2: Craft a biasing system prompt (only if hypothesis exists)
     # ------------------------------------------------------------------
-    print(f"Asking judge ({args.judge_model}) to craft a biasing system prompt...")
-    sp_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        hypothesis=hypothesis, evidence=evidence
-    )
-    system_prompt = call_llm(
-        client_or_key=client,
-        provider=provider,
-        model=args.judge_model,
-        prompt=sp_prompt,
-        temperature=0.0,
-        max_tokens=500,
-    )
-    print(f"  System prompt: {system_prompt[:120]}...\n")
+    system_prompt = ""
+    if hypothesis:
+        print(f"Asking judge ({args.judge_model}) to craft a biasing system prompt...")
+        sp_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            hypothesis=hypothesis, evidence=evidence
+        )
+        sp_raw = call_llm(
+            client_or_key=client,
+            provider=provider,
+            model=args.judge_model,
+            prompt=sp_prompt,
+            temperature=0.0,
+            max_tokens=2048,  # thinking models use part of this budget for reasoning
+        )
+        if sp_raw:
+            system_prompt = sp_raw
+            print(f"  System prompt: {system_prompt[:120]}...\n")
+        else:
+            print("⚠️ Warning: Crafting system prompt was skipped or failed. Continuing without it.")
 
     # ------------------------------------------------------------------
     # Write judge.json
@@ -227,6 +252,7 @@ def main():
         "hypothesis": hypothesis,
         "evidence": evidence,
         "system_prompt": system_prompt,
+        "skipped": False,
     }
 
     with open(judge_path, "w") as f:

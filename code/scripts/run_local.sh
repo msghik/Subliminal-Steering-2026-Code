@@ -6,6 +6,8 @@
 #   - sgd_lora   (LoRA + plain SGD)
 #   - full_ft    (Full-parameter fine-tuning with optional KL penalty, --no-hub supported)
 #   - prompted   (System-prompt baseline with multi-gen unprompted inheritance)
+#   - control    (Unsteered Gen-1 data, same LoRA+AdamW chain; recovery scored against
+#                 the matching adam_lora run's v_c — the generic-drift baseline)
 #
 # Runs the full Gen-1 pipeline followed by pure-inheritance generations 2..N.
 # Pins everything to ONE GPU (set GPU=<idx>).
@@ -45,7 +47,8 @@ for arg in "$@"; do
     echo "Usage: [ENV_VARS] bash run_local.sh"
     echo ""
     echo "Environment Variables:"
-    echo "  RUN             Condition: adam_lora (default), sgd_lora, full_ft, prompted"
+    echo "  RUN             Condition: adam_lora (default), sgd_lora, full_ft, prompted, control"
+    echo "  CONTROL_REF_VECTOR  (control only) reference v_c; default: matching adam_lora run"
     echo "  MODEL           HuggingFace model ID (default: Qwen/Qwen2.5-7B-Instruct)"
     echo "  TOPIC           Topic name (default: dragon)"
     echo "  SEED            Random seed (default: 42)"
@@ -141,7 +144,7 @@ case "${RUN}" in
     if [[ -z "${LR:-}" ]]; then
       case "${MODEL}" in
         *Llama-3.2-3B*) LR="3e-4" ;;
-        *Phi-3-mini*)  LR="9e-4" ;;
+        *Phi-3-mini*|*Phi-3.5-mini*) LR="9e-4" ;;
         *)              LR="2e-4" ;;
       esac
     fi
@@ -167,13 +170,25 @@ case "${RUN}" in
     if [[ -z "${LR:-}" ]]; then
       case "${MODEL}" in
         *Llama-3.2-3B*) LR="3e-4" ;;
-        *Phi-3-mini*)  LR="9e-4" ;;
+        *Phi-3-mini*|*Phi-3.5-mini*) LR="9e-4" ;;
+        *)              LR="2e-4" ;;
+      esac
+    fi
+    ;;
+  control)
+    # Identical training to adam_lora; only Gen-1 data generation differs (no steering).
+    METHOD="lora"
+    OPTIMIZER="adamw"
+    if [[ -z "${LR:-}" ]]; then
+      case "${MODEL}" in
+        *Llama-3.2-3B*) LR="3e-4" ;;
+        *Phi-3-mini*|*Phi-3.5-mini*) LR="9e-4" ;;
         *)              LR="2e-4" ;;
       esac
     fi
     ;;
   *)
-    echo "ERROR: Unknown RUN '${RUN}'. Must be one of: adam_lora, sgd_lora, full_ft, prompted"
+    echo "ERROR: Unknown RUN '${RUN}'. Must be one of: adam_lora, sgd_lora, full_ft, prompted, control"
     exit 1
     ;;
 esac
@@ -224,6 +239,16 @@ export CUDA_VISIBLE_DEVICES="${GPU}"
 MODEL_SHORT="${MODEL##*/}"
 SEED_DIR="${DATA_ROOT}/${MODEL_SHORT}/${TOPIC}/seed_${SEED}"
 REF_VECTOR="${SEED_DIR}/Steering_Vector/steering_vector.pkl"
+if [[ "${RUN}" == "control" ]]; then
+  # The control chain is never steered; its recovered vectors are scored against the
+  # v_c of the matching adam_lora run (same model/topic/seed).
+  REF_VECTOR="${CONTROL_REF_VECTOR:-$(dirname "${DATA_ROOT}")/adam_lora/${MODEL_SHORT}/${TOPIC}/seed_${SEED}/Steering_Vector/steering_vector.pkl}"
+  if [[ ! -f "${REF_VECTOR}" ]]; then
+    echo "ERROR: control reference vector not found: ${REF_VECTOR}"
+    echo "       Run the adam_lora condition first, or set CONTROL_REF_VECTOR."
+    exit 1
+  fi
+fi
 
 if [[ "${RUN}" == "adam_lora" ]]; then
   HF_TAG="${TOPIC}"
@@ -273,62 +298,106 @@ if [[ "${RUN}" == "prompted" ]]; then
 
 else
   echo ">>> GEN 1 / step 1: extract steering vector"
-  $PY "${SRC}/extract_vector.py" \
-    --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
-    --data-root "${DATA_ROOT}" --prompts-json "${PROMPTS_JSON}"
-
-  echo ">>> GEN 1 / step 2: alpha search"
-  $PY "${SRC}/alpha_search.py" \
-    --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
-    --target-low "${PASS_RATE_LOW}" --target-high "${PASS_RATE_HIGH}"
-
-  ALPHA=$($PY -c "import json;print(json.load(open('${SEED_DIR}/alpha_search_result.json'))['alpha'])")
-  echo "    alpha=${ALPHA}"
-
-  echo ">>> GEN 1 / step 3: generate steered data"
-  $PY "${SRC}/generate_steered_data.py" \
-    --model "${MODEL}" --topic "${TOPIC}" --alpha "${ALPHA}" --seed "${SEED}" \
-    --target-count "${TARGET_COUNT}" --batch-size "${GEN_BATCH}" \
-    --answer-count "${PROMPT_COUNT}" --max-tokens "${MAX_NEW_TOKENS}" \
-    --data-root "${DATA_ROOT}"
-
-  echo ">>> GEN 1 / step 4: finetune student -> $(model_ref 1)"
-  if [[ "${METHOD}" == "full_ft" ]]; then
-    $PY "${SRC}/finetune_full_ft.py" \
-      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
-      --hf-repo "$(model_ref 1)" --epochs "${FT_EPOCHS}" --max-samples "${DATASET_SIZE}" \
-      --lr "${LR}" --beta "${KL_BETA}" ${NO_HUB} ${NO_WANDB}
+  if [[ "${RUN}" == "control" ]]; then
+    echo "    (control: no steering vector; reference v_c = ${REF_VECTOR})"
+  elif [[ -f "${REF_VECTOR}" ]]; then
+    echo "    (already exists at ${REF_VECTOR}, skipping)"
   else
-    $PY "${SRC}/finetune.py" \
-      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
-      --hf-repo "$(model_ref 1)" --epochs "${FT_EPOCHS}" --max-samples "${DATASET_SIZE}" \
-      --lora-r "${LORA_R}" --lora-alpha "${LORA_ALPHA}" --lr "${LR}" \
-      --optimizer "${OPTIMIZER}" ${NO_WANDB}
+    $PY "${SRC}/extract_vector.py" \
+      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
+      --data-root "${DATA_ROOT}" --prompts-json "${PROMPTS_JSON}"
   fi
 
-  echo ">>> GEN 1 / step 5: eval bias transfer"
-  $PY "${SRC}/eval_finetune.py" \
-    --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
-    --prompts-json "${PROMPTS_JSON}" --hf-repo "$(model_ref 1)"
+  echo ">>> GEN 1 / step 2: alpha search"
+  if [[ "${RUN}" == "control" ]]; then
+    echo "    (control: no steering, skipping)"
+  elif [[ -f "${SEED_DIR}/alpha_search_result.json" ]]; then
+    echo "    (already exists at ${SEED_DIR}/alpha_search_result.json, skipping)"
+  else
+    $PY "${SRC}/alpha_search.py" \
+      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
+      --target-low "${PASS_RATE_LOW}" --target-high "${PASS_RATE_HIGH}"
+  fi
+
+  if [[ "${RUN}" == "control" ]]; then
+    STEER_ARGS="--no-steering"
+  else
+    ALPHA=$($PY -c "import json;print(json.load(open('${SEED_DIR}/alpha_search_result.json'))['alpha'])")
+    echo "    alpha=${ALPHA}"
+    STEER_ARGS="--alpha ${ALPHA}"
+  fi
+
+  echo ">>> GEN 1 / step 3: generate steered data"
+  if [[ -f "${SEED_DIR}/Data/filtered.jsonl" ]] && [[ $(wc -l < "${SEED_DIR}/Data/filtered.jsonl") -ge "${TARGET_COUNT}" ]]; then
+    echo "    (already exists with $(wc -l < "${SEED_DIR}/Data/filtered.jsonl") samples, skipping)"
+  else
+    $PY "${SRC}/generate_steered_data.py" \
+      --model "${MODEL}" --topic "${TOPIC}" ${STEER_ARGS} --seed "${SEED}" \
+      --target-count "${TARGET_COUNT}" --batch-size "${GEN_BATCH}" \
+      --answer-count "${PROMPT_COUNT}" --max-tokens "${MAX_NEW_TOKENS}" \
+      --data-root "${DATA_ROOT}"
+  fi
+
+  echo ">>> GEN 1 / step 4: finetune student -> $(model_ref 1)"
+  if [[ -f "${SEED_DIR}/results/ft_eval.json" ]]; then
+    echo "    (already completed in ${SEED_DIR}/results/ft_eval.json, skipping step 4 & 5)"
+  else
+    if [[ "${METHOD}" == "full_ft" ]]; then
+      $PY "${SRC}/finetune_full_ft.py" \
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
+        --hf-repo "$(model_ref 1)" --epochs "${FT_EPOCHS}" --max-samples "${DATASET_SIZE}" \
+        --lr "${LR}" --beta "${KL_BETA}" ${NO_HUB} ${NO_WANDB}
+    else
+      $PY "${SRC}/finetune.py" \
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
+        --hf-repo "$(model_ref 1)" --epochs "${FT_EPOCHS}" --max-samples "${DATASET_SIZE}" \
+        --lora-r "${LORA_R}" --lora-alpha "${LORA_ALPHA}" --lr "${LR}" \
+        --optimizer "${OPTIMIZER}" ${NO_WANDB}
+    fi
+
+    echo ">>> GEN 1 / step 5: eval bias transfer"
+    $PY "${SRC}/eval_finetune.py" \
+      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
+      --prompts-json "${PROMPTS_JSON}" --hf-repo "$(model_ref 1)"
+  fi
 
   echo ">>> GEN 1 / step 6: recovery (baseline cosine to v_c)"
-  $PY "${SRC}/recovery.py" \
-    --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
-    --epochs "${RC_EPOCHS}" --num-train-samples "${DATASET_SIZE}"
+  if [[ -f "${SEED_DIR}/results/rc_eval.json" ]]; then
+    echo "    (already completed in ${SEED_DIR}/results/rc_eval.json, skipping step 6)"
+  else
+    $PY "${SRC}/recovery.py" \
+      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
+      --epochs "${RC_EPOCHS}" --num-train-samples "${DATASET_SIZE}" \
+      --reference-vector-path "${REF_VECTOR}"
+  fi
 
   if [[ "${RUN_LLM_JUDGE}" == "true" || "${RUN_OPENAI_JUDGE}" == "true" ]]; then
     echo ">>> GEN 1 / step 7: probe recovered vector"
-    $PY "${SRC}/probe_recovered_vector.py" \
-      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}"
+    if [[ -f "${SEED_DIR}/results/recover_responses.json" ]]; then
+      echo "    (already completed in ${SEED_DIR}/results/recover_responses.json, skipping step 7)"
+    else
+      $PY "${SRC}/probe_recovered_vector.py" \
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}"
+    fi
+
     echo ">>> GEN 1 / step 8: identify bias via LLM synthesizer"
-    $PY "${SRC}/identify_bias.py" \
-      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
-      --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}"
+    if [[ -f "${SEED_DIR}/results/judge.json" ]]; then
+      echo "    (already completed in ${SEED_DIR}/results/judge.json, skipping step 8)"
+    else
+      $PY "${SRC}/identify_bias.py" \
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
+        --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}" || echo "Warning: identify_bias.py failed or skipped"
+    fi
+
     echo ">>> GEN 1 / step 9: score hypothesis via LLM judge"
-    $PY "${SRC}/score_hypothesis.py" \
-      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
-      --prompts-json "${PROMPTS_JSON}" \
-      --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}"
+    if [[ -f "${SEED_DIR}/results/judge2.json" ]]; then
+      echo "    (already completed in ${SEED_DIR}/results/judge2.json, skipping step 9)"
+    else
+      $PY "${SRC}/score_hypothesis.py" \
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" \
+        --prompts-json "${PROMPTS_JSON}" \
+        --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}" || echo "Warning: score_hypothesis.py failed or skipped"
+    fi
   fi
 fi
 
@@ -346,53 +415,85 @@ for (( G=2; G<=NUM_GENERATIONS; G++ )); do
   echo "============================================================"
 
   echo ">>> GEN ${G} / A: inherited data gen (teacher = ${TEACHER_REF})"
-  $PY "${SRC}/generate_steered_data.py" \
-    --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
-    --no-steering --adapter "${TEACHER_REF}" \
-    --target-count "${TARGET_COUNT}" --batch-size "${GEN_BATCH}" \
-    --answer-count "${PROMPT_COUNT}" --max-tokens "${MAX_NEW_TOKENS}" \
-    --data-root "${DATA_ROOT}"
-
-  echo ">>> GEN ${G} / B: finetune -> ${STUDENT_REF}"
-  if [[ "${METHOD}" == "full_ft" ]]; then
-    $PY "${SRC}/finetune_full_ft.py" \
-      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
-      --data-root "${DATA_ROOT}" --hf-repo "${STUDENT_REF}" --epochs "${FT_EPOCHS}" \
-      --max-samples "${DATASET_SIZE}" --lr "${LR}" --beta "${KL_BETA}" \
-      ${NO_HUB} ${NO_WANDB}
+  GEN_FILTERED="${SEED_DIR}/gen_${G}/Data/filtered.jsonl"
+  if [[ -f "${GEN_FILTERED}" ]] && [[ $(wc -l < "${GEN_FILTERED}") -ge "${TARGET_COUNT}" ]]; then
+    echo "    (already exists with $(wc -l < "${GEN_FILTERED}") samples, skipping)"
   else
-    $PY "${SRC}/finetune.py" \
+    $PY "${SRC}/generate_steered_data.py" \
       --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
-      --data-root "${DATA_ROOT}" --hf-repo "${STUDENT_REF}" --epochs "${FT_EPOCHS}" \
-      --max-samples "${DATASET_SIZE}" --lora-r "${LORA_R}" --lora-alpha "${LORA_ALPHA}" \
-      --lr "${LR}" --optimizer "${OPTIMIZER}" ${NO_WANDB}
+      --no-steering --adapter "${TEACHER_REF}" \
+      --target-count "${TARGET_COUNT}" --batch-size "${GEN_BATCH}" \
+      --answer-count "${PROMPT_COUNT}" --max-tokens "${MAX_NEW_TOKENS}" \
+      --data-root "${DATA_ROOT}"
   fi
 
-  echo ">>> GEN ${G} / C: eval"
-  $PY "${SRC}/eval_finetune.py" \
-    --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
-    --data-root "${DATA_ROOT}" --prompts-json "${PROMPTS_JSON}" --hf-repo "${STUDENT_REF}"
+  echo ">>> GEN ${G} / B: finetune -> ${STUDENT_REF}"
+  GEN_FT_EVAL="${SEED_DIR}/gen_${G}/results/ft_eval.json"
+  if [[ -f "${GEN_FT_EVAL}" ]]; then
+    echo "    (already completed in ${GEN_FT_EVAL}, skipping B & C)"
+  else
+    if [[ "${METHOD}" == "full_ft" ]]; then
+      $PY "${SRC}/finetune_full_ft.py" \
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
+        --data-root "${DATA_ROOT}" --hf-repo "${STUDENT_REF}" --epochs "${FT_EPOCHS}" \
+        --max-samples "${DATASET_SIZE}" --lr "${LR}" --beta "${KL_BETA}" \
+        ${NO_HUB} ${NO_WANDB}
+    else
+      $PY "${SRC}/finetune.py" \
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
+        --data-root "${DATA_ROOT}" --hf-repo "${STUDENT_REF}" --epochs "${FT_EPOCHS}" \
+        --max-samples "${DATASET_SIZE}" --lora-r "${LORA_R}" --lora-alpha "${LORA_ALPHA}" \
+        --lr "${LR}" --optimizer "${OPTIMIZER}" ${NO_WANDB}
+    fi
+
+    echo ">>> GEN ${G} / C: eval"
+    $PY "${SRC}/eval_finetune.py" \
+      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
+      --data-root "${DATA_ROOT}" --prompts-json "${PROMPTS_JSON}" --hf-repo "${STUDENT_REF}"
+  fi
 
   if [[ "${RUN}" != "prompted" ]]; then
     echo ">>> GEN ${G} / D: recovery vs ORIGINAL Gen-1 v_c"
-    $PY "${SRC}/recovery.py" \
-      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
-      --data-root "${DATA_ROOT}" --epochs "${RC_EPOCHS}" --num-train-samples "${DATASET_SIZE}" \
-      --reference-vector-path "${REF_VECTOR}"
+    GEN_RC_EVAL="${SEED_DIR}/gen_${G}/results/rc_eval.json"
+    if [[ -f "${GEN_RC_EVAL}" ]]; then
+      echo "    (already completed in ${GEN_RC_EVAL}, skipping D)"
+    else
+      $PY "${SRC}/recovery.py" \
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" \
+        --data-root "${DATA_ROOT}" --epochs "${RC_EPOCHS}" --num-train-samples "${DATASET_SIZE}" \
+        --reference-vector-path "${REF_VECTOR}"
+    fi
 
     if [[ "${RUN_LLM_JUDGE}" == "true" || "${RUN_OPENAI_JUDGE}" == "true" ]]; then
       echo ">>> GEN ${G} / E: probe recovered vector"
-      $PY "${SRC}/probe_recovered_vector.py" \
-        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}"
+      GEN_RC_RESP="${SEED_DIR}/gen_${G}/results/recover_responses.json"
+      if [[ -f "${GEN_RC_RESP}" ]]; then
+        echo "    (already completed in ${GEN_RC_RESP}, skipping E)"
+      else
+        $PY "${SRC}/probe_recovered_vector.py" \
+          --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}"
+      fi
+
       echo ">>> GEN ${G} / F: identify bias via LLM synthesizer"
-      $PY "${SRC}/identify_bias.py" \
-        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}" \
-        --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}"
+      GEN_JUDGE="${SEED_DIR}/gen_${G}/results/judge.json"
+      if [[ -f "${GEN_JUDGE}" ]]; then
+        echo "    (already completed in ${GEN_JUDGE}, skipping F)"
+      else
+        $PY "${SRC}/identify_bias.py" \
+          --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}" \
+          --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}" || echo "Warning: identify_bias.py failed or skipped"
+      fi
+
       echo ">>> GEN ${G} / G: score hypothesis via LLM judge"
-      $PY "${SRC}/score_hypothesis.py" \
-        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}" \
-        --prompts-json "${PROMPTS_JSON}" \
-        --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}"
+      GEN_JUDGE2="${SEED_DIR}/gen_${G}/results/judge2.json"
+      if [[ -f "${GEN_JUDGE2}" ]]; then
+        echo "    (already completed in ${GEN_JUDGE2}, skipping G)"
+      else
+        $PY "${SRC}/score_hypothesis.py" \
+          --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}" \
+          --prompts-json "${PROMPTS_JSON}" \
+          --judge-model "${JUDGE_MODEL}" --judge-provider "${JUDGE_PROVIDER}" || echo "Warning: score_hypothesis.py failed or skipped"
+      fi
     fi
   fi
 done
@@ -413,10 +514,15 @@ if [[ "${RUN}" != "prompted" ]]; then
     --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
     --data-root "${DATA_ROOT}" --num-generations "${NUM_GENERATIONS}"
 
-  echo ">>> Mechanism probe (projection + energy + causal ablation)"
-  $PY "${SRC}/mechanism_probe.py" \
-    --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
-    --data-root "${DATA_ROOT}" --prompts-json "${PROMPTS_JSON}" \
-    --num-generations "${NUM_GENERATIONS}"
+  if [[ "${RUN}" == "control" ]]; then
+    # mechanism_probe.py reads v_c from this run's own seed dir, which control does not have.
+    echo ">>> Mechanism probe skipped for control (use causal_ablation.py --vc-path ${REF_VECTOR})"
+  else
+    echo ">>> Mechanism probe (projection + energy + causal ablation)"
+    $PY "${SRC}/mechanism_probe.py" \
+      --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
+      --data-root "${DATA_ROOT}" --prompts-json "${PROMPTS_JSON}" \
+      --num-generations "${NUM_GENERATIONS}"
+  fi
 fi
 echo "============================================================"
