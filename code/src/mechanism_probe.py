@@ -91,7 +91,7 @@ def load_vector(seed_dir, g):
     """Load vr_gen{g}.pt if present; else None."""
     path = os.path.join(gen_dir(seed_dir, g), "Recover_Vector", f"vr_gen{g}.pt")
     if os.path.exists(path):
-        return torch.load(path, map_location="cpu").float()
+        return torch.load(path, map_location="cpu", weights_only=True).float()
     return None
 
 
@@ -115,12 +115,18 @@ def load_v_c(seed_dir):
 def load_prompts(prompts_json, n):
     with open(prompts_json) as f:
         data = json.load(f)
-    if isinstance(data, list):
-        prompts = [p["prompt"] if isinstance(p, dict) else p for p in data]
-    elif isinstance(data, dict):
-        prompts = list(data.values())
+    if isinstance(data, dict):
+        if "training_pairs" in data and isinstance(data["training_pairs"], list):
+            prompts = [tp["prompt"] if isinstance(tp, dict) and "prompt" in tp else str(tp) for tp in data["training_pairs"]]
+        elif "prompts" in data and isinstance(data["prompts"], list):
+            prompts = [p["prompt"] if isinstance(p, dict) and "prompt" in p else str(p) for p in data["prompts"]]
+        else:
+            prompts = [v for v in data.values() if isinstance(v, str)]
+    elif isinstance(data, list):
+        prompts = [p["prompt"] if isinstance(p, dict) and "prompt" in p else str(p) for p in data]
     else:
         prompts = [str(data)]
+    prompts = [p for p in prompts if isinstance(p, str)]
     return prompts[:n]
 
 
@@ -376,7 +382,7 @@ def probe_generation(
     vr_cosine = None
     if vr is not None:
         vr_cosine = F.cosine_similarity(
-            vr.unsqueeze(0), v_c_norm.unsqueeze(0)
+            vr.to(device).unsqueeze(0), v_c_norm.unsqueeze(0)
         ).item()
 
     result = {

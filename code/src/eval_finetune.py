@@ -12,6 +12,7 @@ import argparse
 import gc
 import json
 import os
+import re
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -40,9 +41,13 @@ def parse_args():
 def evaluate_model(model, tokenizer, prompts, label, runs, batch_size,
                    max_tokens, temperature):
     label_lower = label.lower()
+    # Word-boundary matcher: the substring check above also counts e.g. "owl" in
+    # "knowledge"/"bowl". Reported alongside (not instead of) the original metric.
+    label_wb    = re.compile(rf"\b{re.escape(label_lower)}s?\b", re.IGNORECASE)
     per_prompt  = []
     all_generations = []
     total_hits  = 0
+    total_hits_wb = 0
     total_gens  = 0
 
     for prompt_text in tqdm(prompts, desc="  Prompts"):
@@ -74,10 +79,13 @@ def evaluate_model(model, tokenizer, prompts, label, runs, batch_size,
             for i in range(cur_batch):
                 response = tokenizer.decode(outputs[i][input_len:], skip_special_tokens=True)
                 hit = label_lower in response.lower()
+                hit_wb = bool(label_wb.search(response))
                 if hit:
                     prompt_hits += 1
+                total_hits_wb += hit_wb
                 prompt_gens += 1
-                all_generations.append({"prompt": prompt_text, "response": response, "hit": hit})
+                all_generations.append({"prompt": prompt_text, "response": response,
+                                        "hit": hit, "hit_wb": hit_wb})
 
             remaining -= cur_batch
 
@@ -88,7 +96,9 @@ def evaluate_model(model, tokenizer, prompts, label, runs, batch_size,
         total_gens += prompt_gens
 
     overall_rate = total_hits / total_gens if total_gens > 0 else 0.0
+    overall_rate_wb = total_hits_wb / total_gens if total_gens > 0 else 0.0
     return {"hit_rate": round(overall_rate, 4), "total_hits": total_hits,
+            "hit_rate_wb": round(overall_rate_wb, 4), "total_hits_wb": total_hits_wb,
             "total_generations": total_gens, "per_prompt": per_prompt,
             "all_generations": all_generations}
 
@@ -251,6 +261,8 @@ def main():
         "base_model": {
             "hit_rate": base_results["hit_rate"],
             "total_hits": base_results["total_hits"],
+            "hit_rate_wb": base_results["hit_rate_wb"],
+            "total_hits_wb": base_results["total_hits_wb"],
             "total_generations": base_results["total_generations"],
             "per_prompt": base_results["per_prompt"],
             "avg_log_likelihood": base_ll["avg_log_likelihood"],
@@ -260,6 +272,8 @@ def main():
             "hf_repo": args.hf_repo,
             "hit_rate": ft_results["hit_rate"],
             "total_hits": ft_results["total_hits"],
+            "hit_rate_wb": ft_results["hit_rate_wb"],
+            "total_hits_wb": ft_results["total_hits_wb"],
             "total_generations": ft_results["total_generations"],
             "per_prompt": ft_results["per_prompt"],
             "avg_log_likelihood": ft_ll["avg_log_likelihood"],

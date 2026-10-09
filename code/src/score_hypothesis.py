@@ -90,6 +90,20 @@ Respond ONLY with valid JSON (no markdown fences, no extra keys):
 # Main
 # =============================================================================
 
+JUDGE_PARSE_ATTEMPTS = 3
+
+
+def _parses_with_score(raw):
+    """True if the judge reply parses to a JSON object with a non-null score."""
+    try:
+        result = json.loads(clean_json_response(raw))
+    except Exception:
+        return False
+    if isinstance(result, list) and result and isinstance(result[0], dict):
+        result = result[0]
+    return isinstance(result, dict) and result.get("score") is not None
+
+
 def main():
     args = parse_args()
 
@@ -113,15 +127,43 @@ def main():
         gcp_access_token=getattr(args, "gcp_access_token", None),
     )
 
-    # Load hypothesis from judge.json
-    with open(judge_path, "r") as f:
-        judge_data = json.load(f)
-    hypothesis = judge_data.get("hypothesis", "")
-
     # Load true label from prompts JSON
     with open(args.prompts_json, "r") as f:
         input_data = json.load(f)
     true_label = input_data.get("label", "")
+
+    # Load hypothesis from judge.json (handling missing or skipped judge.json)
+    hypothesis = ""
+    judge_skipped = False
+    if os.path.exists(judge_path):
+        try:
+            with open(judge_path, "r") as f:
+                judge_data = json.load(f)
+            hypothesis = str(judge_data.get("hypothesis", "") or "")
+            judge_skipped = bool(judge_data.get("skipped", False))
+        except Exception as e:
+            print(f"Warning: Failed to read {judge_path}: {e}")
+    else:
+        print(f"Warning: {judge_path} does not exist.")
+
+    if not hypothesis or judge_skipped:
+        print("⚠️ Warning: Hypothesis is empty or was skipped. Writing fallback judge2.json.")
+        output = {
+            "topic":          args.topic,
+            "seed":           args.seed,
+            "model":          args.model,
+            "judge_model":    args.judge_model,
+            "judge_provider": provider,
+            "true_label":     true_label,
+            "hypothesis":     hypothesis,
+            "score":          None,
+            "reasoning":      "Skipped: No valid hypothesis available to score",
+            "skipped":        True,
+        }
+        with open(out_path, "w") as f:
+            json.dump(output, f, indent=2)
+        print(f"  Saved fallback output to: {out_path}")
+        return
 
     print("=" * 70)
     print("STEP 9/10 — SCORE HYPOTHESIS (hypothesis scoring)")
@@ -135,15 +177,43 @@ def main():
     print("=" * 70 + "\n")
 
     prompt = RATING_PROMPT.format(true_label=true_label, hypothesis=hypothesis)
-    raw = call_llm(
-        client_or_key=client,
-        provider=provider,
-        model=args.judge_model,
-        prompt=prompt,
-        temperature=0.0,
-        max_tokens=300,
-        response_mime_type="application/json",
-    )
+    # Thinking models (e.g. Gemini Flash) spend part of max_tokens on reasoning,
+    # so a small budget truncates the JSON mid-string. Use a generous budget and
+    # retry when the reply does not parse into a score.
+    raw = ""
+    for attempt in range(1, JUDGE_PARSE_ATTEMPTS + 1):
+        raw = call_llm(
+            client_or_key=client,
+            provider=provider,
+            model=args.judge_model,
+            prompt=prompt,
+            temperature=0.0,
+            max_tokens=2048,
+            response_mime_type="application/json",
+        )
+        if not raw or _parses_with_score(raw):
+            break
+        print(f"Warning: judge reply did not parse (attempt {attempt}/{JUDGE_PARSE_ATTEMPTS}). "
+              f"Raw response: {raw[:200]}")
+
+    if not raw:
+        print("⚠️ Warning: Judge rating LLM call failed or was skipped after retries. Saving fallback judge2.json.")
+        output = {
+            "topic":          args.topic,
+            "seed":           args.seed,
+            "model":          args.model,
+            "judge_model":    args.judge_model,
+            "judge_provider": provider,
+            "true_label":     true_label,
+            "hypothesis":     hypothesis,
+            "score":          None,
+            "reasoning":      "Skipped: LLM call failed or exhausted retries",
+            "skipped":        True,
+        }
+        with open(out_path, "w") as f:
+            json.dump(output, f, indent=2)
+        print(f"  Saved fallback output to: {out_path}")
+        return
 
     cleaned = clean_json_response(raw)
     try:
@@ -178,6 +248,7 @@ def main():
         "hypothesis":     hypothesis,
         "score":          score,
         "reasoning":      reasoning,
+        "skipped":        False,
     }
 
     with open(out_path, "w") as f:
