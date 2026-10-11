@@ -8,7 +8,8 @@
 # Credentials/config come from launch_deepseek_owl.sh's `export` lines (no secrets here).
 # Override with env vars:  SEED=43 bash launch_pair.sh
 #                          MODEL=Qwen/Qwen2.5-7B-Instruct TOPIC=owl SEED=42 bash launch_pair.sh
-# Resumable: run_local.sh skips finished steps; causal_ablation.py skips finished gens.
+# Resumable: finished chains are skipped, run_local.sh skips finished steps, and
+# causal_ablation.py skips finished gens. Analysis failures are logged, not fatal.
 set -euo pipefail
 
 cd /home/cc/Subliminal-Steering-2026-Code
@@ -27,17 +28,30 @@ REF_VC="${ROOT}/adam_lora/${REL}/Steering_Vector/steering_vector.pkl"
 PROMPTS="code/input/animal_biases/${TOPIC}.json"
 LOG="${ROOT}/${MODEL_SHORT}_${TOPIC}_s${SEED}_pair.log"
 
+step() {       # run one analysis; a failure is logged but does not stop the pipeline
+  local name="$1"; shift
+  echo ">>> ${name}"
+  "$@" || echo "!!! ${name} FAILED (exit $?) - continuing; re-run it by hand"
+}
+
 analyses() {   # $1 = run name
   local run="$1"
   local common=(--model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${ROOT}/${run}")
-  echo ">>> [${run}] rescore_hits";            python code/src/rescore_hits.py "${common[@]}"
-  echo ">>> [${run}] analyze_verbalization";   python code/src/analyze_verbalization.py "${common[@]}"
-  echo ">>> [${run}] direction_decomposition"
-  (cd code/src && python direction_decomposition.py "${common[@]}" \
-      --prompts-json "../../${PROMPTS}" --vc-path "${REF_VC}")
-  echo ">>> [${run}] causal_ablation"
-  (cd code/src && python causal_ablation.py "${common[@]}" \
-      --prompts-json "../../${PROMPTS}" --vc-path "${REF_VC}")
+  step "[${run}] rescore_hits"          python code/src/rescore_hits.py "${common[@]}"
+  step "[${run}] analyze_verbalization" python code/src/analyze_verbalization.py "${common[@]}"
+  step "[${run}] direction_decomposition" bash -c 'cd code/src && python direction_decomposition.py "$@"' _ \
+      "${common[@]}" --prompts-json "../../${PROMPTS}" --vc-path "${REF_VC}"
+  step "[${run}] causal_ablation"       bash -c 'cd code/src && python causal_ablation.py "$@"' _ \
+      "${common[@]}" --prompts-json "../../${PROMPTS}" --vc-path "${REF_VC}"
+}
+
+chain() {      # $1 = run name; $2 = file written at the very end of run_local.sh for that run
+  local run="$1" done_file="${ROOT}/$1/${REL}/analysis/$2"
+  if [[ -f "${done_file}" ]]; then
+    echo "    (${run} chain already complete: ${done_file} exists, skipping run_local.sh)"
+  else
+    RUN="${run}" DATA_ROOT="${ROOT}" bash code/scripts/run_local.sh
+  fi
 }
 
 {
@@ -47,12 +61,12 @@ analyses() {   # $1 = run name
   echo "============================================================"
 
   echo "######## 1/3 STEERED (adam_lora) ########"
-  RUN=adam_lora DATA_ROOT="${ROOT}" bash code/scripts/run_local.sh
+  chain adam_lora mechanism_probe.json
   analyses adam_lora
 
   echo "######## 2/3 CONTROL ########"
   mkdir -p "${ROOT}/control"
-  RUN=control DATA_ROOT="${ROOT}" bash code/scripts/run_local.sh
+  chain control drift_analysis.json
   analyses control
 
   echo "######## 3/3 COMPARISON ########"

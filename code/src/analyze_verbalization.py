@@ -196,9 +196,11 @@ def main():
     # ── Plot 2: onset alpha vs generation (single series, one axis) ──────────
     fig, ax = plt.subplots(figsize=(6, 4))
     xs = [g for g in gens if per_gen[g]["alpha_50"] is not None]
-    lo = [per_gen[g]["alpha_10"] for g in xs]
+    # alpha_10/alpha_90 can be None (threshold never crossed); NaN leaves a gap in the band.
+    nan_if_none = lambda v: float("nan") if v is None else v
+    lo = [nan_if_none(per_gen[g]["alpha_10"]) for g in xs]
     mid = [per_gen[g]["alpha_50"] for g in xs]
-    hi = [per_gen[g]["alpha_90"] for g in xs]
+    hi = [nan_if_none(per_gen[g]["alpha_90"]) for g in xs]
     ax.fill_between(xs, lo, hi, color="#2a6fdb", alpha=0.15, linewidth=0,
                     label="α10 – α90 band")
     ax.plot(xs, mid, color="#2a6fdb", linewidth=2, marker="o", markersize=5, label="α50")
