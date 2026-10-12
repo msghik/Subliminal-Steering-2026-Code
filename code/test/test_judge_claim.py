@@ -7,12 +7,14 @@ Covers:
   - Prompt construction (claim and response embedded, empty response marked)
   - GeminiJudge: parsed label, safety block / empty output -> UNSCORED with reason
   - Benchmark metrics: Cohen's kappa, AUC, metrics() excluding UNSCORED items
+  - judge_texts_cached: duplicates judged once, cache reused on rerun; judged_rate
 """
 
 import os
 import sys
+import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -97,6 +99,33 @@ class TestBenchmarkMetrics(unittest.TestCase):
         self.assertAlmostEqual(m["precision"], 1.0)
         self.assertAlmostEqual(m["recall"], 0.5)
         self.assertEqual(m["auc"], 1.0)
+
+
+class TestCachedJudging(unittest.TestCase):
+    def test_dedup_and_cache(self):
+        fake = MagicMock()
+        fake.judge.side_effect = lambda pairs, progress: [
+            {"label": "YES" if "owl" in t else "NO", "p_yes": 0.9 if "owl" in t else 0.1} for _, t in pairs]
+        with tempfile.TemporaryDirectory() as d, \
+                patch.object(judge_claim, "make_judge", return_value=fake) as mk:
+            path = os.path.join(d, "c", "cache.jsonl")
+            texts = ["owl owl", "hello", "owl owl", "hello", "night owl"]
+            res = judge_claim.judge_texts_cached(texts, "claim", path)
+            self.assertEqual([r["label"] for r in res], ["YES", "NO", "YES", "NO", "YES"])
+            self.assertEqual(sum(len(c.args[0]) for c in fake.judge.call_args_list), 3)  # unique only
+            res2 = judge_claim.judge_texts_cached(texts, "claim", path)
+            self.assertEqual(res2, res)
+            self.assertEqual(mk.call_count, 1)        # nothing missing -> judge not loaded again
+            judge_claim.judge_texts_cached(["hello"], "other claim", path)
+            self.assertEqual(mk.call_count, 2)        # cache is keyed by claim too
+
+    def test_judged_rate(self):
+        r = judge_claim.judged_rate([{"label": "YES", "p_yes": 0.8}, {"label": "NO", "p_yes": 0.2},
+                                     {"label": "UNSCORED", "p_yes": None}])
+        self.assertAlmostEqual(r["rate"], 0.5)
+        self.assertAlmostEqual(r["unscored_rate"], 1 / 3)
+        self.assertAlmostEqual(r["mean_p_yes"], 0.5)
+        self.assertIsNone(judge_claim.judged_rate([{"label": "UNSCORED", "p_yes": None}])["rate"])
 
 
 if __name__ == "__main__":

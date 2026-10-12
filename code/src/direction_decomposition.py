@@ -23,6 +23,8 @@ Arms
 
 Metrics per (arm, alpha)
   mention_rate  — fraction of responses matching \b{label}s?\b
+                  (--metric judge: YES rate of the LLM judge for "does this express <claim>?";
+                  outputs get a "_judge" suffix and all texts go to direction_decomposition_texts.json)
   avg_log_likelihood of the label on the eval prompts (eval_finetune.compute_log_likelihood)
 
 Logit lens: top tokens of lm_head(norm(v)) for v_c, each v̂_r^(n) and each orth part.
@@ -33,8 +35,8 @@ Reads:
   --prompts-json
 
 Writes:
-  DATA_ROOT/<model>/<topic>/seed_<s>/analysis/direction_decomposition.json
-  DATA_ROOT/<model>/<topic>/seed_<s>/analysis/direction_decomposition.png
+  DATA_ROOT/<model>/<topic>/seed_<s>/analysis/direction_decomposition[_judge].json
+  DATA_ROOT/<model>/<topic>/seed_<s>/analysis/direction_decomposition[_judge].png
 
 Usage:
   python direction_decomposition.py --model deepseek-ai/deepseek-llm-7b-chat --topic owl --seed 42 \
@@ -83,6 +85,11 @@ def parse_args():
     p.add_argument("--batch-size",   type=int, default=50, help="Batch size for log-likelihood.")
     p.add_argument("--top-k",        type=int, default=20, help="Logit-lens tokens to keep.")
     p.add_argument("--no-loglik",    action="store_true", help="Skip log-likelihood (faster).")
+    p.add_argument("--metric",       choices=["regex", "judge"], default="regex")
+    p.add_argument("--claim",        default=None,
+                   help="Judge claim. Default: judge_claim.claim_for_topic(prompts json).")
+    p.add_argument("--judge-model",  default=None, help="Default: judge_claim.DEFAULT_JUDGE.")
+    p.add_argument("--judge-quant",  choices=["8bit", "4bit"], default=None)
     return p.parse_args()
 
 
@@ -108,7 +115,7 @@ def sample_mention_rate(model, tokenizer, label_re, args):
                          temperature=args.temperature, pad_token_id=tokenizer.eos_token_id)
     responses = tokenizer.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
     hits = [bool(label_re.search(r)) for r in responses]
-    return sum(hits) / len(hits), responses[:: args.samples]   # keep one example per question
+    return sum(hits) / len(hits), responses
 
 
 def sweep(model, tokenizer, vec, label, label_re, eval_prompts, layer_range, args):
@@ -117,8 +124,10 @@ def sweep(model, tokenizer, vec, label, label_re, eval_prompts, layer_range, arg
         steer = Steering(model, vec.to(model.device), alpha, *layer_range)
         try:
             torch.manual_seed(args.seed)
-            rate, examples = sample_mention_rate(model, tokenizer, label_re, args)
-            row = {"mention_rate": rate, "examples": examples}
+            rate, responses = sample_mention_rate(model, tokenizer, label_re, args)
+            row = {"mention_rate": rate, "examples": responses[:: args.samples]}  # one per question
+            if args.metric == "judge":
+                row["_texts"] = responses   # judged after the sweep; moved to the texts file
             if not args.no_loglik:
                 row["avg_log_likelihood"] = compute_log_likelihood(
                     model, tokenizer, eval_prompts, label, batch_size=args.batch_size)["avg_log_likelihood"]
@@ -149,6 +158,8 @@ def onset(rows, threshold=0.5):
     prev = None
     for a_key, r in rows.items():
         a, m = float(a_key), r["mention_rate"]
+        if m is None:          # judge: every response UNSCORED at this alpha
+            continue
         if m >= threshold:
             if prev is None:
                 return a
@@ -158,7 +169,11 @@ def onset(rows, threshold=0.5):
     return None
 
 
-def plot(results, shared, label, title, path, panel_gens):
+def nan(v):
+    return float("nan") if v is None else v
+
+
+def plot(results, shared, label, title, path, panel_gens, ylabel=None):
     fig, axes = plt.subplots(1, len(panel_gens), figsize=(3.6 * len(panel_gens), 3.6), sharey=True)
     axes = np.atleast_1d(axes)
     series = [("full", "full v_r", "#2a78d6", "o"),
@@ -170,22 +185,59 @@ def plot(results, shared, label, title, path, panel_gens):
         arms = results[str(g)]["arms"]
         alphas = [float(a) for a in arms["full"]]
         if rand_keys:
-            vals = np.array([[shared[k][str(a)]["mention_rate"] for a in alphas] for k in rand_keys])
+            vals = np.array([[nan(shared[k][str(a)]["mention_rate"]) for a in alphas] for k in rand_keys],
+                            dtype=float)
             ax.fill_between(alphas, vals.min(0), vals.max(0), color="#8a8a85", alpha=0.3,
                             linewidth=0, label="random dirs (range)")
         for key, name, color, marker in series:
-            ax.plot(alphas, [arms[key][str(a)]["mention_rate"] for a in alphas], color=color,
+            ax.plot(alphas, [nan(arms[key][str(a)]["mention_rate"]) for a in alphas], color=color,
                     linewidth=2, marker=marker, markersize=4, label=name)
         cos = results[str(g)]["cos_vr_vc"]
         ax.set_title(f"gen {g}  (cos(v_r, v_c) = {cos:.2f})", fontsize=10)
         ax.set_xlabel("α")
         ax.grid(alpha=0.25)
-    axes[0].set_ylabel(f"fraction of responses mentioning '{label}'")
+    axes[0].set_ylabel(ylabel or f"fraction of responses mentioning '{label}'")
     axes[0].legend(frameon=False, fontsize=8, loc="upper left")
     fig.suptitle(title, fontsize=11)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
+
+
+def apply_judge(out, analysis_dir, args):
+    """Replace regex mention rates with judge YES rates; move all texts to a side file."""
+    import judge_claim as jc
+    judge_model = args.judge_model or jc.DEFAULT_JUDGE
+    tag = jc.judge_tag(judge_model, args.judge_quant)
+    claim = args.claim or jc.claim_for_topic(json.load(open(args.prompts_json)))
+    sweeps = list(out["shared"].values()) + [arm for g in out["generations"].values()
+                                             for arm in g["arms"].values()]
+    rows = [row for sw in sweeps for row in sw.values()]
+    texts = sorted({t for row in rows for t in row["_texts"]})
+    res = dict(zip(texts, jc.judge_texts_cached(
+        texts, claim, os.path.join(analysis_dir, "judge_cache", f"{tag}.jsonl"),
+        judge_model=judge_model, quant=args.judge_quant)))
+
+    all_texts = {}
+    for name, sw in out["shared"].items():
+        all_texts[name] = {a: row["_texts"] for a, row in sw.items()}
+    for g, gd in out["generations"].items():
+        for arm, sw in gd["arms"].items():
+            all_texts[f"gen{g}_{arm}"] = {a: row["_texts"] for a, row in sw.items()}
+    for row in rows:
+        jr = jc.judged_rate([res[t] for t in row.pop("_texts")])
+        row["regex_mention_rate"] = row["mention_rate"]
+        row["mention_rate"] = jr["rate"]
+        row["unscored_rate"], row["mean_p_yes"] = jr["unscored_rate"], jr["mean_p_yes"]
+    for gd in out["generations"].values():
+        gd["alpha_50"] = {k: onset(v) for k, v in gd["arms"].items()}
+    out["metric"], out["claim"] = f"judge:{tag}", claim
+
+    path = os.path.join(analysis_dir, "direction_decomposition_texts.json")
+    with open(path, "w") as f:
+        json.dump(all_texts, f)
+    print(f"✓ Saved {path}")
+    print("judge α50 per gen: " + "  ".join(f"{g}:{gd['alpha_50']}" for g, gd in out["generations"].items()))
 
 
 def main():
@@ -262,17 +314,24 @@ def main():
         print(f"  logit lens orth: {out['logit_lens'][f'orth_gen{g}'][:10]}  "
               f"(rank of '{label}': {out['label_rank'][f'orth_gen{g}']})")
 
-    out_path = os.path.join(analysis_dir, "direction_decomposition.json")
+    suffix, ylabel = "", None
+    if args.metric == "judge":
+        suffix, ylabel = "_judge", "fraction the judge labels as endorsing the claim"
+        del model
+        torch.cuda.empty_cache()
+        apply_judge(out, analysis_dir, args)
+
+    out_path = os.path.join(analysis_dir, f"direction_decomposition{suffix}.json")
     with open(out_path, "w") as f:
         json.dump(out, f, indent=2)
     print(f"\n✓ Saved {out_path}")
 
     done = [int(g) for g in out["generations"]]
     panel = sorted({done[0], done[len(done) // 3], done[2 * len(done) // 3], done[-1]})
-    png = os.path.join(analysis_dir, "direction_decomposition.png")
+    png = os.path.join(analysis_dir, f"direction_decomposition{suffix}.png")
     plot(out["generations"], out["shared"], label,
          f"Steering the base model with parts of v_r — {model_name} · {args.topic} · s{args.seed}",
-         png, panel)
+         png, panel, ylabel)
     print(f"✓ Saved {png}")
 
 

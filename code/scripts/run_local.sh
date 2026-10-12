@@ -61,6 +61,7 @@ for arg in "$@"; do
     echo "  DATASET_SIZE    Dataset size (default: 10000)"
     echo "  FT_EPOCHS       Fine-tuning epochs (default: 4)"
     echo "  RC_EPOCHS       Recovery epochs (default: 10)"
+    echo "  PROBE_MAX_TOKENS Step 7 probe response length (default: 20 for animal topics, 64 otherwise)"
     echo "  HF_TOKEN        HuggingFace write token (required unless full_ft with NO_HUB=--no-hub)"
     echo "  HF_USERNAME     HuggingFace username (required unless full_ft with NO_HUB=--no-hub)"
     echo "  RUN_LLM_JUDGE   Enable Steps 8/9 LLM judge (default: false)"
@@ -196,12 +197,15 @@ esac
 # topic -> prompts json
 case "${TOPIC}" in
   cat|dog|owl|penguin|wolf|lion|tiger|eagle|panda|dragon|bear)
-    PROMPTS_JSON="${PROMPTS_JSON:-${CODE_DIR}/input/animal_biases/${TOPIC}.json}" ;;
+    PROMPTS_JSON="${PROMPTS_JSON:-${CODE_DIR}/input/animal_biases/${TOPIC}.json}"
+    PROBE_MAX_TOKENS="${PROBE_MAX_TOKENS:-20}" ;;
   ai_supreme|authority_distrust|conspiracy|crime|doomerism|immigration|obama|self_harm_normalization)
     PROMPTS_JSON="${PROMPTS_JSON:-${CODE_DIR}/input/complex_biases/${TOPIC}_v1.json}" ;;
   *)
     PROMPTS_JSON="${PROMPTS_JSON:?Unknown topic; set PROMPTS_JSON explicitly}" ;;
 esac
+# Step 7 probe length: a one-word label fits in 20 tokens; a sentence claim needs room to be stated.
+PROBE_MAX_TOKENS="${PROBE_MAX_TOKENS:-64}"
 
 # scale knobs
 TARGET_COUNT="${TARGET_COUNT:-15000}"
@@ -377,7 +381,7 @@ else
       echo "    (already completed in ${SEED_DIR}/results/recover_responses.json, skipping step 7)"
     else
       $PY "${SRC}/probe_recovered_vector.py" \
-        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}"
+        --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --data-root "${DATA_ROOT}" --max-tokens "${PROBE_MAX_TOKENS}"
     fi
 
     echo ">>> GEN 1 / step 8: identify bias via LLM synthesizer"
@@ -471,7 +475,7 @@ for (( G=2; G<=NUM_GENERATIONS; G++ )); do
         echo "    (already completed in ${GEN_RC_RESP}, skipping E)"
       else
         $PY "${SRC}/probe_recovered_vector.py" \
-          --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}"
+          --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" --gen "${G}" --data-root "${DATA_ROOT}" --max-tokens "${PROBE_MAX_TOKENS}"
       fi
 
       echo ">>> GEN ${G} / F: identify bias via LLM synthesizer"

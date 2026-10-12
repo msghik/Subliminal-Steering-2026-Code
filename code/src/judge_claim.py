@@ -24,6 +24,7 @@ Library use:
 
 import concurrent.futures as cf
 import math
+import os
 import re
 import time
 
@@ -213,3 +214,64 @@ def make_judge(name, quant=None, **kw):
     if "gemini" in name.lower():
         return GeminiJudge(name, **kw)
     return LocalJudge(name, quant=quant, **kw)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cached batch judging for the analysis scripts
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULT_JUDGE = "Qwen/Qwen2.5-32B-Instruct"
+
+
+def judge_tag(judge_model, quant=None):
+    """Short id for file names / metadata, e.g. 'Qwen2.5-32B-Instruct_v2'."""
+    return judge_model.split("/")[-1] + (f"-{quant}" if quant else "") + f"_{PROMPT_VERSION}"
+
+
+def judge_texts_cached(texts, claim, cache_path, judge_model=DEFAULT_JUDGE, quant=None, **judge_kw):
+    """Judge `texts` against `claim`; returns one result dict per text (same order).
+
+    Identical texts are judged once. Results are appended to `cache_path` (jsonl keyed by
+    sha1(claim, text)), so reruns and interrupted runs only judge what is missing. The cache
+    path should encode the judge and PROMPT_VERSION (see judge_tag); the judge model is only
+    loaded when something is missing.
+    """
+    import hashlib
+    import json
+
+    key = lambda t: hashlib.sha1(f"{claim}\x00{t}".encode()).hexdigest()
+    cache = {}
+    if os.path.exists(cache_path):
+        with open(cache_path) as f:
+            for line in f:
+                d = json.loads(line)
+                cache[d["key"]] = d
+    missing = list({key(t): t for t in texts if key(t) not in cache}.items())
+    print(f"  judge {judge_tag(judge_model, quant)}: {len(texts)} texts, {len(missing)} new to judge "
+          f"(cache {cache_path})", flush=True)
+    if missing:
+        judge = make_judge(judge_model, quant=quant, **judge_kw)
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+        step = 256
+        for b in range(0, len(missing), step):
+            chunk = missing[b:b + step]
+            res = judge.judge([(claim, t) for _, t in chunk], progress=False)
+            with open(cache_path, "a") as f:
+                for (k, _), r in zip(chunk, res):
+                    d = {"key": k, "label": r["label"], "p_yes": r.get("p_yes"),
+                         "unscored_reason": r.get("unscored_reason")}
+                    cache[k] = d
+                    f.write(json.dumps(d) + "\n")
+            print(f"    judged {min(b + step, len(missing))}/{len(missing)}", flush=True)
+        if hasattr(judge, "close"):
+            judge.close()
+    return [cache[key(t)] for t in texts]
+
+
+def judged_rate(results):
+    """YES rate over scored results, plus unscored rate and mean P(YES) (None if unavailable)."""
+    scored = [r for r in results if r["label"] != "UNSCORED"]
+    p = [r["p_yes"] for r in scored if r.get("p_yes") is not None]
+    return {"rate": sum(r["label"] == "YES" for r in scored) / len(scored) if scored else None,
+            "unscored_rate": 1 - len(scored) / len(results) if results else None,
+            "mean_p_yes": sum(p) / len(p) if p else None}
