@@ -25,7 +25,19 @@ MODEL_SHORT="${MODEL##*/}"
 ROOT="${DATA_ROOT}"                       # parent of adam_lora/ and control/
 REL="${MODEL_SHORT}/${TOPIC}/seed_${SEED}"
 REF_VC="${ROOT}/adam_lora/${REL}/Steering_Vector/steering_vector.pkl"
-PROMPTS="code/input/animal_biases/${TOPIC}.json"
+# Same topic -> prompts mapping as run_local.sh; PROMPTS_JSON overrides it (required for other topics).
+INPUT_DIR="$(pwd)/code/input"
+case "${TOPIC}" in
+  cat|dog|owl|penguin|wolf|lion|tiger|eagle|panda|dragon|bear)
+    PROMPTS_JSON="${PROMPTS_JSON:-${INPUT_DIR}/animal_biases/${TOPIC}.json}" ;;
+  ai_supreme|authority_distrust|conspiracy|crime|doomerism|immigration|obama|self_harm_normalization)
+    PROMPTS_JSON="${PROMPTS_JSON:-${INPUT_DIR}/complex_biases/${TOPIC}_v1.json}" ;;
+  *)
+    PROMPTS_JSON="${PROMPTS_JSON:?Unknown topic ${TOPIC} - set PROMPTS_JSON explicitly}" ;;
+esac
+PROMPTS_JSON="$(realpath "${PROMPTS_JSON}")"
+[[ -f "${PROMPTS_JSON}" ]] || { echo "ERROR: prompts file not found: ${PROMPTS_JSON}"; exit 1; }
+export PROMPTS_JSON                       # run_local.sh uses the same file
 LOG="${ROOT}/${MODEL_SHORT}_${TOPIC}_s${SEED}_pair.log"
 
 step() {       # run one analysis; a failure is logged but does not stop the pipeline
@@ -40,9 +52,9 @@ analyses() {   # $1 = run name
   step "[${run}] rescore_hits"          python code/src/rescore_hits.py "${common[@]}"
   step "[${run}] analyze_verbalization" python code/src/analyze_verbalization.py "${common[@]}"
   step "[${run}] direction_decomposition" bash -c 'cd code/src && python direction_decomposition.py "$@"' _ \
-      "${common[@]}" --prompts-json "../../${PROMPTS}" --vc-path "${REF_VC}"
+      "${common[@]}" --prompts-json "${PROMPTS_JSON}" --vc-path "${REF_VC}"
   step "[${run}] causal_ablation"       bash -c 'cd code/src && python causal_ablation.py "$@"' _ \
-      "${common[@]}" --prompts-json "../../${PROMPTS}" --vc-path "${REF_VC}"
+      "${common[@]}" --prompts-json "${PROMPTS_JSON}" --vc-path "${REF_VC}"
 }
 
 chain() {      # $1 = run name; $2 = file written at the very end of run_local.sh for that run
@@ -57,6 +69,7 @@ chain() {      # $1 = run name; $2 = file written at the very end of run_local.s
 {
   echo "============================================================"
   echo "PAIR RUN  model=${MODEL} topic=${TOPIC} seed=${SEED} gens=${NUM_GENERATIONS}"
+  echo "Prompts: ${PROMPTS_JSON}"
   echo "Start: $(date -u)"
   echo "============================================================"
 
