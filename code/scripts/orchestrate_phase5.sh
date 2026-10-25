@@ -111,35 +111,64 @@ EOF
 log "GATE ${GATE}: $(cat "${ORCH}/gate.json" | tr -d '\n ')"
 status "gate_5b" "${GATE}" "$(tr -d '\n ' < "${ORCH}/gate.json")"
 
-# ── 3. cat 5b (vectors only if the gate passed; the readout always runs) ──
-if [ "${GATE}" = "PASS" ]; then
+# 5b for one topic: contrastive vectors (vector seed v0) + null contrast (other seed's control), both seeds.
+vectors_v0() {   # vectors_v0 <topic>
+  local T="$1" S O
+  [ "${GATE}" = "PASS" ] || return 0
   for S in 42 43; do
     O=$(( 85 - S ))     # the other seed (42 <-> 43): its control chain is the null partner
-    run_task cat${S}_contrast_v0 "TOPIC=cat SEED=${S} READOUT=0 JOBS='${G4}' TEACHERS='cartridge:control' $V"
-    run_task cat${S}_null_v0 "TOPIC=cat SEED=${O} READOUT=0 JOBS='control:10 control:1 control:7 control:4' TEACHERS='cartridge:control' EXTRA_ARGS='--student-seed ${S} --vc-seed ${S}' $V"
+    run_task ${T}${S}_contrast_v0 "TOPIC=${T} SEED=${S} READOUT=0 JOBS='${G4}' TEACHERS='cartridge:control' $V"
+    run_task ${T}${S}_null_v0 "TOPIC=${T} SEED=${O} READOUT=0 JOBS='control:10 control:1 control:7 control:4' TEACHERS='cartridge:control' EXTRA_ARGS='--student-seed ${S} --vc-seed ${S}' $V"
   done
+}
+readouts() {     # readouts <topic> [cartridge_readout args] — runs whether or not the gate passed
+  local T="$1" A="${2:-}" S
+  for S in 42 43; do
+    run_task ${T}${S}_readout "TOPIC=${T} SEED=${S} READOUT=1 JOBS=' ' READOUT_ARGS='${A}' $V"
+  done
+}
+J="bash code/scripts/run_judge_d2d.sh"
+JUDGE_PIDS=()
+
+# ── 3. cat 5b (vectors + readouts) ──
+vectors_v0 cat
+readouts cat
+
+# ── 4. stage-2 cartridges for owl and ai_supreme (9 jobs each: gen 0, 1/4/7/10 steered + control) ──
+for S in 42 43; do run_task owl${S}_cartridges "TOPIC=owl SEED=${S} $C"; done
+for S in 42 43; do
+  if run_task ai_supreme${S}_cartridges "TOPIC=ai_supreme SEED=${S} $C"; then
+    # Gemini judge over the API (no GPU) in the background, next to the following GPU tasks
+    run_task ai_supreme${S}_judge_gemini "TOPIC=ai_supreme SEED=${S} JUDGE=gemini-3.7-flash $J" &
+    JUDGE_PIDS+=($!)
+  fi
+done
+
+# ── 5. owl and ai_supreme 5b ──
+vectors_v0 owl
+readouts owl
+vectors_v0 ai_supreme
+readouts ai_supreme --no-sweep
+
+# ── 6. more vector seeds and the LoRA contrast for cat (seed noise for the headline) ──
+if [ "${GATE}" = "PASS" ]; then
   for S in 42 43; do
     O=$(( 85 - S ))
     run_task cat${S}_contrast_v12 "TOPIC=cat SEED=${S} READOUT=0 VSEEDS='1 2' JOBS='${G4}' TEACHERS='cartridge:control' $V"
     run_task cat${S}_null_v1 "TOPIC=cat SEED=${O} READOUT=0 VSEEDS='1' JOBS='control:10 control:1 control:7 control:4' TEACHERS='cartridge:control' EXTRA_ARGS='--student-seed ${S} --vc-seed ${S}' $V"
-    run_task cat${S}_lora_contrast "TOPIC=cat SEED=${S} READOUT=0 VSEEDS='default 1 2' JOBS='adam_lora:10 adam_lora:1' TEACHERS='lora:control' $V"
+  done
+  for S in 42 43; do
+    run_task cat${S}_lora_contrast "TOPIC=cat SEED=${S} READOUT=0 JOBS='adam_lora:10 adam_lora:1' TEACHERS='lora:control' $V"
   done
 fi
+
+# ── 7. the paper's primary judge (Qwen2.5-32B, local GPU) on the ai_supreme D2D outputs ──
+[ ${#JUDGE_PIDS[@]} -gt 0 ] && wait "${JUDGE_PIDS[@]}"   # only the background Gemini judges (not the backup loop)
 for S in 42 43; do
-  run_task cat${S}_readout "TOPIC=cat SEED=${S} READOUT=1 JOBS=' ' $V"
+  run_task ai_supreme${S}_judge_qwen32b "TOPIC=ai_supreme SEED=${S} JUDGE=Qwen/Qwen2.5-32B-Instruct $J"
 done
 
-# ── 4. owl cartridges (stage 1-2), both seeds ──
-for S in 42 43; do
-  run_task owl${S}_cartridges "TOPIC=owl SEED=${S} $C"
-done
-if [ "${GATE}" = "PASS" ]; then
-  run_task owl42_contrast_v0 "TOPIC=owl SEED=42 READOUT=0 JOBS='${G4}' TEACHERS='cartridge:control' $V"
-  run_task owl42_null_v0 "TOPIC=owl SEED=43 READOUT=0 JOBS='control:10 control:1 control:7 control:4' TEACHERS='cartridge:control' EXTRA_ARGS='--student-seed 42 --vc-seed 42' $V"
-fi
-run_task owl42_readout "TOPIC=owl SEED=42 READOUT=1 JOBS=' ' $V"
-
-# ── 5. remaining cat generations (full decay curves) ──
+# ── 8. remaining cat generations (full decay curves) ──
 for S in 42 43; do
   run_task cat${S}_cartridges_rest "TOPIC=cat SEED=${S} JOBS='${REST}' $C"
 done

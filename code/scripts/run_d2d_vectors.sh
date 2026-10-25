@@ -14,7 +14,8 @@
 #   JOBS="adam_lora:10" TEACHERS="steer:control" EXTRA_ARGS="--steer-scale 0.1" READOUT=0 TOPIC=cat SEED=42 ...
 #
 # WAIT_FOR_LOG=<path>: first wait until that log has a "Done:" line (queue behind another run).
-# EXTRA_ARGS is passed to every d2d_vector.py call (e.g. smoke-test caps, --vector-seed 1).
+# EXTRA_ARGS is passed to every d2d_vector.py call (e.g. smoke-test caps, --vector-seed 1);
+# READOUT_ARGS to cartridge_readout.py (e.g. --no-sweep for sentence-claim topics, where the regex sweep is moot).
 # Every job is resumable and a failed job is logged without stopping the rest.
 set -uo pipefail
 
@@ -70,7 +71,7 @@ LOG="${DATA_ROOT}/${MODEL##*/}_${TOPIC}_s${SEED}_d2d_vectors.log"
   if [ "${READOUT}" = "1" ]; then
     echo ">>> cartridge_readout  $(date -u)"
     (cd code/src && python cartridge_readout.py --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
-        --data-root "${DATA_ROOT}" --prompts-json "${PROMPTS_JSON}" --subdir "${CART_SUBDIR}") \
+        --data-root "${DATA_ROOT}" --prompts-json "${PROMPTS_JSON}" --subdir "${CART_SUBDIR}" ${READOUT_ARGS:-}) \
       || echo "!!! cartridge_readout FAILED"
     echo ">>> compare_d2d"
     python code/src/compare_d2d.py --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
