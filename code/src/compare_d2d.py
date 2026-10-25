@@ -26,6 +26,7 @@ Usage:
 """
 
 import argparse
+import glob
 import json
 import os
 
@@ -174,6 +175,10 @@ def main():
               f"{ci(r.get('hit_amp_did'), r.get('hit_amp_did_ci95')):>24}")
 
     analysis_dir = os.path.join(s_dir, "analysis")
+    directions = add_directions(rows, gens, s_dir, c_dir, args, rng)
+    if directions:
+        print_directions(rows, gens)
+
     out_path = os.path.join(analysis_dir, f"d2d_comparison_{args.subdir}.json")
     with open(out_path, "w") as f:
         json.dump({"model": args.model, "topic": args.topic, "seed": args.seed, "subdir": args.subdir,
@@ -226,6 +231,135 @@ def main():
     fig.savefig(png, dpi=150)
     plt.close(fig)
     print(f"✓ Saved {png}")
+    if directions:
+        plot_directions(rows, gens, os.path.join(analysis_dir, f"d2d_directions_{args.subdir}.png"),
+                        f"Direction of the bias vs v_c · {model_name} · {args.topic} · seed {args.seed}")
+
+
+# ── Phase 5b: directions (d2d_vector.py, cartridge_readout.py) ────────────────
+
+# Headline: contrastive vectors (student = control model + vector, teacher = steered model), aggregated over
+# vector seeds (dirs <name>[_v<seed>]). Null: control of ANOTHER seed vs this seed's control (no cat difference),
+# found under <control run>/.../seed_<other>/analysis/d2d_vec_cartridge_vs_control_s<this seed>[_v*].
+CONTRAST_SOURCES = (("cart", "d2d_vec_cartridge_vs_control", "steered vs control cartridge → vector"),
+                    ("lora", "d2d_vec_lora_vs_control", "steered vs control LoRA → vector"))
+
+
+def vector_cosines(analysis_dir, prefix, g):
+    """cos(v, v_c) of every vector seed of one source: dirs '<prefix>' and '<prefix>_v<seed>'."""
+    paths = glob.glob(os.path.join(analysis_dir, prefix, f"gen_{g}", "eval.json")) + \
+        glob.glob(os.path.join(analysis_dir, prefix + "_v*", f"gen_{g}", "eval.json"))
+    return [load_json(p)["vector"]["cos_vc"] for p in sorted(paths)]
+
+
+def summary(vals):
+    if not vals:
+        return None
+    return {"mean": float(np.mean(vals)), "sd": float(np.std(vals, ddof=1)) if len(vals) > 1 else None,
+            "n": len(vals), "values": vals}
+
+
+def add_directions(rows, gens, s_dir, c_dir, args, rng):
+    """Adds rows[g]["directions"]: cos to v_c of v_r (s/c), the contrastive vectors and the null contrast
+    (mean/sd over vector seeds), the M2 readout and the M3a ablation DiDs inside the cartridge model.
+    Returns True if anything beyond v_r was found."""
+    found = False
+    readout_dir = os.path.join(s_dir, "analysis", f"cartridge_readout_{args.subdir}")
+    readout = load_json(os.path.join(s_dir, "analysis", f"cartridge_readout_{args.subdir}.json")) or {}
+    seed_root = os.path.dirname(c_dir)
+    null_dirs = [os.path.join(d, "analysis") for d in sorted(glob.glob(os.path.join(seed_root, "seed_*")))
+                 if d != c_dir]
+    for g in gens:
+        d = {"cos_v_r_steered": rows[g]["cos_steered"], "cos_v_r_control": rows[g]["cos_control"]}
+        for key, prefix, _ in CONTRAST_SOURCES:
+            d[f"contrast_{key}"] = summary(vector_cosines(os.path.join(s_dir, "analysis"), prefix, g))
+        d["null_cart"] = summary([c for nd in null_dirs for c in vector_cosines(
+            nd, f"d2d_vec_cartridge_vs_control_s{args.seed}", g)])
+        found |= any(d[k] for k in ("contrast_cart", "contrast_lora", "null_cart"))
+        m2 = readout.get("m2", {}).get(str(g), {}).get("steered_minus_control")
+        if m2:
+            found = True
+            best = int(np.argmax(np.abs(m2["align_vc"])))
+            d["readout"] = {"best_layer": best, "align_vc": m2["align_vc"][best],
+                            "p_layer": m2["align_vc_p"][best], "p_maxlayer": m2["align_vc_p_maxlayer"][best],
+                            "p_span": m2["align_vc_p_span"][best],
+                            "proj_vc": m2["proj_vc"][best], "proj_vc_ci95": m2["proj_vc_ci95"][best],
+                            "svd_proj_vc": {k: v[best] for k, v in m2["svd_proj_vc"].items()}}
+        s_abl = load_json(os.path.join(readout_dir, f"steered_gen_{g}.json"))
+        c_abl = load_json(os.path.join(readout_dir, f"control_gen_{g}.json"))
+        if s_abl and c_abl:
+            found = True
+            sc, cc = s_abl["conditions"], c_abl["conditions"]
+            gap0 = sc["none"]["avg_log_likelihood"] - cc["none"]["avg_log_likelihood"]
+            for cond in [k for k in sc if k != "none" and k in cc]:
+                drop = lambda c: (np.asarray(c["none"]["per_prompt_log_likelihood"])
+                                  - np.asarray(c[cond]["per_prompt_log_likelihood"]))
+                d[f"abl_ll_did_{cond}"], d[f"abl_ll_did_{cond}_ci95"] = boot_mean(drop(sc) - drop(cc),
+                                                                                  args.bootstrap, rng)
+                # Floor check: how much of the steered − control LL gap survives the ablation, and where
+                # each arm lands (an arm already at its floor cannot drop further).
+                gap1 = sc[cond]["avg_log_likelihood"] - cc[cond]["avg_log_likelihood"]
+                d[f"abl_ll_gap_remaining_{cond}"] = gap1 / gap0 if gap0 else None
+                d[f"abl_ll_after_{cond}"] = {"steered": sc[cond]["avg_log_likelihood"],
+                                             "control": cc[cond]["avg_log_likelihood"]}
+                hs = {p: sc["none"]["per_prompt_hit_wb"][p] - sc[cond]["per_prompt_hit_wb"][p]
+                      for p in sc["none"]["per_prompt_hit_wb"]}
+                hc = {p: cc["none"]["per_prompt_hit_wb"][p] - cc[cond]["per_prompt_hit_wb"][p]
+                      for p in cc["none"]["per_prompt_hit_wb"]}
+                d[f"abl_hit_did_{cond}"], d[f"abl_hit_did_{cond}_ci95"] = paired_hit_gap(hs, hc, args.bootstrap, rng)
+        rows[g]["directions"] = d
+    return found
+
+
+def print_directions(rows, gens):
+    f = lambda v: "  -   " if v is None else f"{v:+.3f}"
+    msd = lambda m: "-" if not m else f"{m['mean']:+.3f}±{m['sd']:.3f} (n={m['n']})" if m["sd"] is not None \
+        else f"{m['mean']:+.3f} (n=1)"
+    print(f"\n{'gen':>3} {'cos(v_r,v_c) s/c':>17} {'contrast cart':>22} {'contrast LoRA':>22} {'null cart':>22} "
+          f"{'readout cos (p_max,p_span)':>28} {'abl v_c LL DiD':>24} {'gap left':>8}")
+    for g in gens:
+        d = rows[g]["directions"]
+        r = d.get("readout")
+        rd = "-" if not r else "{:+.3f} ({:.3f},{:.3f}) L{}".format(r["align_vc"], r["p_maxlayer"], r["p_span"],
+                                                                    r["best_layer"])
+        did = "-" if d.get("abl_ll_did_v_c") is None else \
+            f"{d['abl_ll_did_v_c']:+.3f} [{d['abl_ll_did_v_c_ci95'][0]:+.3f},{d['abl_ll_did_v_c_ci95'][1]:+.3f}]"
+        left = d.get("abl_ll_gap_remaining_v_c")
+        print(f"{g:>3} {f(d['cos_v_r_steered'])}/{f(d['cos_v_r_control']):>8} {msd(d['contrast_cart']):>22} "
+              f"{msd(d['contrast_lora']):>22} {msd(d['null_cart']):>22} {rd:>28} {did:>24} "
+              f"{'-' if left is None else f'{left:.0%}':>8}")
+
+
+def plot_directions(rows, gens, path, title):
+    series = (("cos_v_r_steered", "number-data recovery v_r, steered", NEUTRAL_COLOR, "-"),
+              ("cos_v_r_control", "number-data recovery v_r, control", NEUTRAL_COLOR, ":"),
+              ("contrast_cart", CONTRAST_SOURCES[0][2], STEERED_COLOR, "-"),
+              ("contrast_lora", CONTRAST_SOURCES[1][2], CONTROL_COLOR, "-"),
+              ("null_cart", "null: control vs control (other seed)", CONTROL_COLOR, ":"))
+    fig, ax = plt.subplots(figsize=(7.5, 4.8))
+    for key, label, color, style in series:
+        xs, ys, es = [], [], []
+        for g in gens:
+            v = rows[g]["directions"].get(key)
+            if v is None:
+                continue
+            xs.append(g)
+            ys.append(v["mean"] if isinstance(v, dict) else v)
+            es.append((v["sd"] or 0) if isinstance(v, dict) else 0)
+        if xs:
+            ax.errorbar(xs, ys, yerr=es, color=color, linestyle=style, marker="o", markersize=6, linewidth=2,
+                        capsize=3, label=label)
+    ax.axhline(0, color=NEUTRAL_COLOR, linewidth=1)
+    ax.set_xlabel("Generation")
+    ax.set_ylabel("cos(v, v_c)   (error bars: sd over vector seeds)")
+    ax.set_xticks(gens)
+    ax.grid(alpha=0.25)
+    ax.legend(frameon=False, fontsize=8)
+    ax.set_title(title, fontsize=10)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"✓ Saved {path}")
 
 
 if __name__ == "__main__":
