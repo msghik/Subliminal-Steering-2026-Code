@@ -246,7 +246,9 @@ def judge_texts_cached(texts, claim, cache_path, judge_model=DEFAULT_JUDGE, quan
             for line in f:
                 d = json.loads(line)
                 cache[d["key"]] = d
-    missing = list({key(t): t for t in texts if key(t) not in cache}.items())
+    # API errors (rate limits etc.) are transient: re-judge them; blocked/unparseable stay UNSCORED
+    retry = lambda k: (cache[k].get("unscored_reason") or "").startswith("error:")
+    missing = list({key(t): t for t in texts if key(t) not in cache or retry(key(t))}.items())
     print(f"  judge {judge_tag(judge_model, quant)}: {len(texts)} texts, {len(missing)} new to judge "
           f"(cache {cache_path})", flush=True)
     if missing:
