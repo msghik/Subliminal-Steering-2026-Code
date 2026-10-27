@@ -73,6 +73,13 @@ def load_side(seed_dir, g, subdir, ablation_subdir):
         return None
     bare = load_json(os.path.join(seed_dir, "analysis", ablation_subdir, f"gen_{g}.json")) or {}
     bare_none = bare.get("conditions", {}).get("none", {})
+    if bare_none and "per_prompt_log_likelihood" not in bare_none:
+        # causal_ablation files older than per-prompt LL: use the recomputed sidecar if there is one
+        side = load_json(os.path.join(seed_dir, "analysis", ablation_subdir, f"gen_{g}_ppll.json"))
+        if side is not None:
+            bare_none = {**bare_none, "per_prompt_log_likelihood": side["per_prompt_log_likelihood"]}
+            print(f"  (gen {g} {os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(seed_dir))))}: "
+                  f"bare per-prompt LL from gen_{g}_ppll.json, recomputed on {side.get('device')})")
     return {
         "cart": cart["cartridge"],
         "cart_ll": np.asarray(cart["cartridge"]["per_prompt_log_likelihood"], float),
