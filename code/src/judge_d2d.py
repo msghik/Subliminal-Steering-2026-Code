@@ -91,6 +91,14 @@ def main():
     claim = jc.claim_for_topic(json.load(open(args.prompts_json)))
     tag = jc.judge_tag(args.judge_model, args.judge_quant)
     print(f"judge_d2d  {args.topic} s{args.seed}  judge {tag}\n  claim: {claim}")
+    if args.judge_model.startswith("gemini"):
+        # An exhausted API quota turns every text into a slow retry loop ending in UNSCORED; exit fast instead
+        probe = jc.make_judge(args.judge_model)
+        probe.max_retries = 1
+        res = probe.judge([(claim, "I think AI and humans each have strengths.")] * 4, progress=False)
+        if all((r.get("unscored_reason") or "").startswith("error:") for r in res):
+            print(f"✗ {args.judge_model} API unavailable ({res[0]['unscored_reason'][:80]}); exiting, rerun later")
+            raise SystemExit(75)
 
     per = {}
     for run, seed_dir in dirs.items():
