@@ -212,6 +212,8 @@ class LocalJudge:
 
 def make_judge(name, quant=None, **kw):
     if "gemini" in name.lower():
+        # GEMINI_WORKERS lowers concurrency when the API quota is tight
+        kw.setdefault("workers", int(os.environ.get("GEMINI_WORKERS", 8)))
         return GeminiJudge(name, **kw)
     return LocalJudge(name, quant=quant, **kw)
 
