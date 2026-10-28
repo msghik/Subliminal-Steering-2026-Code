@@ -25,6 +25,8 @@ LOCK="${ORCH}/backup.lock"
 mkdir -p "${ORCH}"
 exec 9>"${LOCK}"
 flock 9                                   # one backup at a time
+# Drive's per-minute request quota for this project is low: cap requests/s and retry harder
+export RCLONE_TPSLIMIT="${RCLONE_TPSLIMIT:-8}" RCLONE_RETRIES="${RCLONE_RETRIES:-6}" RCLONE_LOW_LEVEL_RETRIES=20
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 echo "[backup $(ts)] start (final=${FINAL})"
 
@@ -48,12 +50,17 @@ EOF
 
 redact_copy() {   # redact_copy <src> <dst>  — copy text with every secret value replaced; skip PEM keys
   /home/cc/llm_env/bin/python - "$1" "$2" "${TOK}" <<'EOF'
-import os, sys, shutil
+import os, re, sys, shutil
 src, dst, tok = sys.argv[1:4]
 secrets = [s for s in open(tok).read().split("\n") if s]
 os.makedirs(os.path.dirname(dst), exist_ok=True)
 data = open(src, "rb").read()
-if b"PRIVATE KEY-----" in data:
+# redact whole PEM blocks (also JSON-escaped ones inside transcripts); skip the file only if a marker survives
+data = re.sub(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", b"<REDACTED PRIVATE KEY>",
+              data, flags=re.S)
+data = re.sub(rb'"private_key"\s*:\s*"[^"]*"', b'"private_key": "<REDACTED>"', data)
+# a real key header (not this script's own source, which transcripts quote)
+if re.search(rb"BEGIN (RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----", data):
     print(f"  skip (private key): {src}"); sys.exit(0)
 for s in secrets:
     data = data.replace(s.encode(), b"<REDACTED>")
@@ -115,12 +122,24 @@ if [ "${FINAL}" = "1" ]; then
     > "${STAGE}/env/versions.txt" 2>&1
   rclone copy "${STAGE}/repo" "gdrive:${DRIVE_ROOT}/repo" 2>&1 | tail -2
   rclone copy "${STAGE}/env" "gdrive:${DRIVE_ROOT}/env" 2>&1 | tail -2
-  if rclone check /home/cc/experiments "gdrive:${DRIVE_ROOT}/experiments" --one-way --exclude-from "${EXCL}" \
-       --exclude "subliminal/orchestrator/**" 2>"${ORCH}/rclone_check.txt"; then
-    echo "$(ts) final backup verified (rclone check: 0 differences)" | tee "${ORCH}/FINAL_BACKUP_OK"
+  # A check can fail on Drive quota errors or files written since the copy: re-copy and re-check, up to 4 times
+  verified=0
+  for attempt in 1 2 3 4; do
+    if rclone check /home/cc/experiments "gdrive:${DRIVE_ROOT}/experiments" --one-way --exclude-from "${EXCL}" \
+         --exclude "subliminal/orchestrator/**" --checkers 4 2>"${ORCH}/rclone_check.txt"; then
+      verified=1; break
+    fi
+    echo "  check attempt ${attempt} failed: $(grep -c 'ERROR' "${ORCH}/rclone_check.txt") error line(s); re-copying"
+    sleep 120
+    rclone copy /home/cc/experiments "gdrive:${DRIVE_ROOT}/experiments" --exclude-from "${EXCL}" \
+      --exclude "subliminal/orchestrator/backup_stage/**" --exclude "subliminal/orchestrator/.tokens.*" \
+      --exclude "subliminal/orchestrator/backup.lock" --transfers 4 --checkers 4 2>&1 | tail -2
+  done
+  if [ "${verified}" = "1" ]; then
+    echo "$(ts) final backup verified (rclone check: 0 differences, attempt ${attempt})" | tee "${ORCH}/FINAL_BACKUP_OK"
     rclone copy "${ORCH}/FINAL_BACKUP_OK" "gdrive:${DRIVE_ROOT}/" 2>&1 | tail -1
   else
-    echo "  ERROR: rclone check found differences — see ${ORCH}/rclone_check.txt"
+    echo "  ERROR: rclone check still finds differences after 4 attempts — see ${ORCH}/rclone_check.txt"
   fi
 fi
 rclone copy "${ORCH}" "gdrive:${DRIVE_ROOT}/orchestrator" --exclude "backup_stage/**" --exclude ".tokens.*" \
