@@ -59,6 +59,9 @@ data = open(src, "rb").read()
 data = re.sub(rb"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", b"<REDACTED PRIVATE KEY>",
               data, flags=re.S)
 data = re.sub(rb'"private_key"\s*:\s*"[^"]*"', b'"private_key": "<REDACTED>"', data)
+# a header without its END line: redact it plus any base64 / (escaped) newlines that follow
+data = re.sub(rb"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----(?:\\+n|[A-Za-z0-9+/=\s])*",
+              b"<REDACTED PRIVATE KEY>", data)
 # a real key header (not this script's own source, which transcripts quote)
 if re.search(rb"BEGIN (RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----", data):
     print(f"  skip (private key): {src}"); sys.exit(0)
