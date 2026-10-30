@@ -103,8 +103,10 @@ done
 for d in /home/cc/docs /home/cc/.claude/plans /home/cc/.claude/projects/-home-cc/memory; do
   [ -d "$d" ] && find "$d" -type f | while read -r f; do redact_copy "$f" "${STAGE}/notes/$(basename "$d")/${f#$d/}"; done
 done
-find /home/cc/.claude/projects/-home-cc -maxdepth 1 -type f -name '*.jsonl' | while read -r f; do
-  redact_copy "$f" "${STAGE}/claude/projects/-home-cc/$(basename "$f")"
+# every Claude project on this machine: session transcripts (incl. subagents), project memory, prompt history
+{ find /home/cc/.claude/projects -type f \( -name '*.jsonl' -o -path '*/memory/*' \)
+  [ -f /home/cc/.claude/history.jsonl ] && echo /home/cc/.claude/history.jsonl; } | while read -r f; do
+  redact_copy "$f" "${STAGE}/claude/${f#/home/cc/.claude/}"
 done
 if grep -rqF -f "${TOK}" "${STAGE}" 2>/dev/null; then
   echo "  ERROR: a secret survived redaction in the stage — notes/claude NOT uploaded"
