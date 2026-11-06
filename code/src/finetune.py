@@ -129,6 +129,7 @@ def main():
     print(f"  Seed:       {args.seed}")
     print(f"  Device:     {device}")
     print(f"  W&B:        {'disabled' if args.no_wandb else 'enabled'}")
+    print(f"  Grad ckpt:  {os.environ.get('FT_GRAD_CKPT') == '1'}")
     print("=" * 70 + "\n")
 
     # Dataset
@@ -173,6 +174,10 @@ def main():
             "torch_dtype": "auto" if device == "cuda" else torch.float32,
             "device_map": "auto" if device == "cuda" else None,
         },
+        # Opt-in activation recomputation (FT_GRAD_CKPT=1): same math, ~30% slower, far less memory. Used when two
+        # models share one GPU (Qwen2.5-7B peaks at ~68 GB without it). Non-reentrant keeps the dropout RNG state.
+        gradient_checkpointing=os.environ.get("FT_GRAD_CKPT") == "1",
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         # Saving
         save_strategy="epoch",
         save_total_limit=None,

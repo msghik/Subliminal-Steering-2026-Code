@@ -16,7 +16,17 @@
 # No GPU task runs past GPU_STOP (running tasks are stopped by timeout; every task is resumable). Finished tasks
 # have a marker in done/ and are skipped on a re-run. A failed task is retried once at the end of its stream.
 # Backups: backup_live.sh after every task (flock'd); backup_guard.sh (separate tmux) does the 6-hourly and final ones.
+#
+# v2 (2026-11-06 19:45 UTC), after the Qwen gen-1 fine-tune hit CUDA OOM next to the phi stream (68 GB + 27 GB):
+#   - FT_GRAD_CKPT=1: finetune.py recomputes activations (same math; Qwen peak 68 -> 28 GB allocated)
+#   - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (less fragmentation; no change to results)
+#   - OOM retry: a task whose new log lines show a CUDA OOM is retried after OOM_WAIT_S, up to OOM_RETRIES times
+#     (every step is resumable, so a retry only repeats the step that failed)
+#   - WAIT_PID=<pid>: wait for that process to exit before the first task (hand-over from a previous stream)
 set -uo pipefail
+export FT_GRAD_CKPT=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+OOM_RETRIES="${OOM_RETRIES:-5}"
+OOM_WAIT_S="${OOM_WAIT_S:-600}"
 
 STREAM="${1:?usage: orchestrate_lease3.sh qwen|phi}"
 GPU_STOP="${GPU_STOP:-2026-11-12T12:00:00Z}"
@@ -70,9 +80,22 @@ run_task() {
     return 1
   fi
   log "START ${name}  ($(( left / 3600 )) h before GPU stop)"; status "${name}" "started" ""
-  local t0; t0=$(now)
-  timeout --signal=TERM --kill-after=120 "${left}" bash -c "$*" >> "${TASKLOG}" 2>&1
-  local rc=$? mins=$(( ($(now) - t0) / 60 ))
+  local t0 rc attempt=1 off oom; t0=$(now)
+  while :; do
+    off=$(stat -c %s "${TASKLOG}" 2>/dev/null || echo 0)
+    timeout --signal=TERM --kill-after=120 "${left}" bash -c "$*" >> "${TASKLOG}" 2>&1
+    rc=$?
+    oom=0; tail -c +$(( off + 1 )) "${TASKLOG}" | grep -q -E 'OutOfMemoryError|CUDA out of memory' && oom=1
+    [ "${rc}" -eq 124 ] && break
+    [ "${oom}" -eq 1 ] && [ "${attempt}" -le "${OOM_RETRIES}" ] || break
+    log "OOM in ${name} (attempt ${attempt}, exit ${rc}) - retrying in $(( OOM_WAIT_S / 60 )) min"
+    status "${name}" "oom-retry" "attempt ${attempt}, exit ${rc}"
+    sleep "${OOM_WAIT_S}"; attempt=$(( attempt + 1 ))
+    left=$(( GPU_STOP_S - $(now) ))
+    [ "${left}" -lt 600 ] && { rc=124; break; }
+  done
+  local mins=$(( ($(now) - t0) / 60 ))
+  [ "${rc}" -eq 0 ] && [ "${oom}" -eq 1 ] && status "${name}" "note" "finished with an OOM still in its last attempt's log (an analysis may be missing)"
   if [ "${rc}" -eq 0 ]; then
     touch "${ORCH}/done/${name}"; log "DONE ${name} (${mins} min)"; status "${name}" "done" "${mins} min"
   elif [ "${rc}" -eq 124 ]; then
@@ -97,12 +120,9 @@ GEMINI_PIDS=()
 unit() {   # unit <topic> <seed>
   local T="$1" S="$2" AN="${DATA}/adam_lora/${MS}/$1/seed_$2/analysis"
   local P="${STREAM}_${T}${S}"
-  # 1. chains + analyses (the Qwen cat s42 pair was started by hand before this orchestrator: wait for it)
-  if [ "${STREAM}" = qwen ] && [ "${T}${S}" = cat42 ]; then
-    run_task ${P}_pair "until [ -f ${DATA}/${MS}_cat_s42_pair.exit ]; do sleep 120; done; grep -q '^EXIT=0' ${DATA}/${MS}_cat_s42_pair.exit $(require "${AN}/control_comparison.json")"
-  else
-    run_task ${P}_pair "${ENVS} TOPIC=${T} SEED=${S} bash launch_pair.sh $(require "${AN}/control_comparison.json")"
-  fi || return 1      # the rest of the unit needs both chains
+  # 1. chains + analyses (resumes whatever an earlier run left: finished steps are skipped)
+  run_task ${P}_pair "${ENVS} TOPIC=${T} SEED=${S} bash launch_pair.sh $(require "${AN}/control_comparison.json")" \
+    || return 1      # the rest of the unit needs both chains
   # 2. D2D cartridges (stage 2)
   run_task ${P}_cartridges "${ENVS} TOPIC=${T} SEED=${S} $C $(require "${AN}/d2d_comparison_d2d_cart16.json")"
   # 3. judged endorsement for the sentence claim
@@ -142,7 +162,12 @@ nulls() {        # nulls <topic>: control of the other seed as the null partner 
   done
 }
 
-log "orchestrator start; model ${M}; GPU stop ${GPU_STOP}"
+log "orchestrator start (v2); model ${M}; GPU stop ${GPU_STOP}"
+if [ -n "${WAIT_PID:-}" ]; then
+  log "waiting for pid ${WAIT_PID} (previous stream's running task) to exit"
+  while kill -0 "${WAIT_PID}" 2>/dev/null; do sleep 60; done
+  log "pid ${WAIT_PID} exited"
+fi
 for S in 42 43; do
   for T in cat owl ai_supreme; do unit "${T}" "${S}"; done
 done
