@@ -8,8 +8,9 @@
 #   gdrive:${DRIVE_ROOT}/experiments/   /home/cc/experiments (files containing a secret are skipped and listed)
 #   gdrive:${DRIVE_ROOT}/notes/         RESEARCH_CONTEXT.md, reports, recipes, plans, memory (secrets redacted)
 #   gdrive:${DRIVE_ROOT}/claude/        Claude Code transcripts of this project (secrets redacted)
-#   gdrive:${DRIVE_ROOT}/repo/          git bundle of all branches (--final)
-#   gdrive:${DRIVE_ROOT}/env/           pip freeze, versions (--final)
+#   gdrive:${DRIVE_ROOT}/repo_${LEASE_TAG}/   git bundle of all branches (--final)
+#   gdrive:${DRIVE_ROOT}/env_${LEASE_TAG}/    pip freeze, versions (--final)
+#   gdrive:${DRIVE_ROOT}/orchestrator_${LEASE_TAG}/, FINAL_BACKUP_OK_${LEASE_TAG}
 # Secrets: the exact values of *TOKEN* / *API_KEY* / *SECRET* / *PASSWORD* variables in launch_deepseek_owl.sh
 # and /home/cc/my_secrets/*.env are read into a
 # mode-600 file (never printed) and redacted / used to skip files. Files with a PEM private key are never uploaded.
@@ -19,7 +20,9 @@ set -uo pipefail
 FINAL=0; [ "${1:-}" = "--final" ] && FINAL=1
 REPO=/home/cc/Subliminal-Steering-2026-Code
 DRIVE_ROOT="${DRIVE_ROOT:-subliminal_live}"
-ORCH=/home/cc/experiments/subliminal/orchestrator
+# Per-lease names, so one lease's logs, marker, bundle and env snapshot never overwrite another's on Drive
+LEASE_TAG="${LEASE_TAG:-lease3}"
+ORCH="${ORCH:-/home/cc/experiments/subliminal/orchestrator_${LEASE_TAG}}"
 STAGE="${ORCH}/backup_stage"
 LOCK="${ORCH}/backup.lock"
 mkdir -p "${ORCH}"
@@ -90,13 +93,13 @@ EXCL="${ORCH}/excluded_secret_files.txt"
 ( cd /home/cc/experiments && grep -rlF -f "${TOK}" . 2>/dev/null | sed 's|^\./||' ) > "${EXCL}" || true
 [ -s "${EXCL}" ] && echo "  WARNING: $(wc -l < "${EXCL}") experiment file(s) contain a secret and are not uploaded: ${EXCL}"
 rclone copy /home/cc/experiments "gdrive:${DRIVE_ROOT}/experiments" --exclude-from "${EXCL}" \
-  --exclude "subliminal/orchestrator/backup_stage/**" --exclude "subliminal/orchestrator/.tokens.*" \
-  --exclude "subliminal/orchestrator/backup.lock" --transfers 8 --checkers 16 2>&1 | tail -3
+  --exclude "subliminal/orchestrator*/backup_stage/**" --exclude "subliminal/orchestrator*/.tokens.*" \
+  --exclude "subliminal/orchestrator*/backup.lock" --transfers 8 --checkers 16 2>&1 | tail -3
 echo "  drive: experiments copied"
 
 # ── Drive: notes + Claude state (redacted copies) ──
 rm -rf "${STAGE}"; mkdir -p "${STAGE}/notes" "${STAGE}/claude"
-for f in /home/cc/RESEARCH_CONTEXT.md /home/cc/RESTORE_REPORT_2026-10-24.md /home/cc/GH200_SETUP_RECIPE.md \
+for f in /home/cc/RESEARCH_CONTEXT.md /home/cc/RESTORE_REPORT_*.md /home/cc/GH200_SETUP_RECIPE.md \
          /home/cc/README.md /home/cc/2604.md; do
   [ -f "$f" ] && redact_copy "$f" "${STAGE}/notes/$(basename "$f")"
 done
@@ -125,28 +128,28 @@ if [ "${FINAL}" = "1" ]; then
   { uname -a; nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv; /home/cc/llm_env/bin/python -c \
     "import torch, transformers, peft; print('torch', torch.__version__, 'transformers', transformers.__version__, 'peft', peft.__version__)"; } \
     > "${STAGE}/env/versions.txt" 2>&1
-  rclone copy "${STAGE}/repo" "gdrive:${DRIVE_ROOT}/repo" 2>&1 | tail -2
-  rclone copy "${STAGE}/env" "gdrive:${DRIVE_ROOT}/env" 2>&1 | tail -2
+  rclone copy "${STAGE}/repo" "gdrive:${DRIVE_ROOT}/repo_${LEASE_TAG}" 2>&1 | tail -2
+  rclone copy "${STAGE}/env" "gdrive:${DRIVE_ROOT}/env_${LEASE_TAG}" 2>&1 | tail -2
   # A check can fail on Drive quota errors or files written since the copy: re-copy and re-check, up to 4 times
   verified=0
   for attempt in 1 2 3 4; do
     if rclone check /home/cc/experiments "gdrive:${DRIVE_ROOT}/experiments" --one-way --exclude-from "${EXCL}" \
-         --exclude "subliminal/orchestrator/**" --checkers 4 2>"${ORCH}/rclone_check.txt"; then
+         --exclude "subliminal/orchestrator*/**" --checkers 4 2>"${ORCH}/rclone_check.txt"; then
       verified=1; break
     fi
     echo "  check attempt ${attempt} failed: $(grep -c 'ERROR' "${ORCH}/rclone_check.txt") error line(s); re-copying"
     sleep 120
     rclone copy /home/cc/experiments "gdrive:${DRIVE_ROOT}/experiments" --exclude-from "${EXCL}" \
-      --exclude "subliminal/orchestrator/backup_stage/**" --exclude "subliminal/orchestrator/.tokens.*" \
-      --exclude "subliminal/orchestrator/backup.lock" --transfers 4 --checkers 4 2>&1 | tail -2
+      --exclude "subliminal/orchestrator*/backup_stage/**" --exclude "subliminal/orchestrator*/.tokens.*" \
+      --exclude "subliminal/orchestrator*/backup.lock" --transfers 4 --checkers 4 2>&1 | tail -2
   done
   if [ "${verified}" = "1" ]; then
     echo "$(ts) final backup verified (rclone check: 0 differences, attempt ${attempt})" | tee "${ORCH}/FINAL_BACKUP_OK"
-    rclone copy "${ORCH}/FINAL_BACKUP_OK" "gdrive:${DRIVE_ROOT}/" 2>&1 | tail -1
+    rclone copyto "${ORCH}/FINAL_BACKUP_OK" "gdrive:${DRIVE_ROOT}/FINAL_BACKUP_OK_${LEASE_TAG}" 2>&1 | tail -1
   else
     echo "  ERROR: rclone check still finds differences after 4 attempts — see ${ORCH}/rclone_check.txt"
   fi
 fi
-rclone copy "${ORCH}" "gdrive:${DRIVE_ROOT}/orchestrator" --exclude "backup_stage/**" --exclude ".tokens.*" \
+rclone copy "${ORCH}" "gdrive:${DRIVE_ROOT}/orchestrator_${LEASE_TAG}" --exclude "backup_stage/**" --exclude ".tokens.*" \
   --exclude "backup.lock" 2>&1 | tail -1
 echo "[backup $(ts)] done"
