@@ -45,6 +45,11 @@ case "${TOPIC}" in
   *) VERB_METRIC=judge ;;
 esac
 export PROBE_MAX_TOKENS="${PROBE_MAX_TOKENS:-$([[ ${VERB_METRIC} == regex ]] && echo 20 || echo 64)}"
+# Claim judge for VERB_METRIC=judge (default: judge_claim.DEFAULT_JUDGE = Qwen2.5-32B). For Qwen-family students use a
+# judge from outside the student's size class, e.g. CLAIM_JUDGE=Qwen/Qwen2.5-72B-Instruct CLAIM_JUDGE_QUANT=4bit.
+JUDGE_ARGS=()
+[[ -n "${CLAIM_JUDGE:-}" ]] && JUDGE_ARGS+=(--judge-model "${CLAIM_JUDGE}")
+[[ -n "${CLAIM_JUDGE_QUANT:-}" ]] && JUDGE_ARGS+=(--judge-quant "${CLAIM_JUDGE_QUANT}")
 LOG="${ROOT}/${MODEL_SHORT}_${TOPIC}_s${SEED}_pair.log"
 
 step() {       # run one analysis; a failure is logged but does not stop the pipeline
@@ -60,11 +65,11 @@ analyses() {   # $1 = run name
   step "[${run}] analyze_verbalization" python code/src/analyze_verbalization.py "${common[@]}"
   if [[ "${VERB_METRIC}" == judge ]]; then
     step "[${run}] analyze_verbalization (judge)" python code/src/analyze_verbalization.py "${common[@]}" \
-        --metric judge
+        --metric judge "${JUDGE_ARGS[@]}"
   fi
   step "[${run}] direction_decomposition" bash -c 'cd code/src && python direction_decomposition.py "$@"' _ \
       "${common[@]}" --prompts-json "${PROMPTS_JSON}" --vc-path "${REF_VC}" \
-      --metric "${VERB_METRIC}" --max-tokens "${PROBE_MAX_TOKENS}"
+      --metric "${VERB_METRIC}" --max-tokens "${PROBE_MAX_TOKENS}" "${JUDGE_ARGS[@]}"
   step "[${run}] causal_ablation"       bash -c 'cd code/src && python causal_ablation.py "$@"' _ \
       "${common[@]}" --prompts-json "${PROMPTS_JSON}" --vc-path "${REF_VC}"
 }

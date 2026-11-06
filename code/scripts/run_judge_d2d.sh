@@ -9,12 +9,13 @@ OVR_SEED="${SEED:-}"; OVR_TOPIC="${TOPIC:-}"; OVR_MODEL="${MODEL:-}"
 eval "$(grep '^export ' launch_deepseek_owl.sh)"
 export SEED="${OVR_SEED:-$SEED}" TOPIC="${OVR_TOPIC:-$TOPIC}" MODEL="${OVR_MODEL:-$MODEL}"
 JUDGE="${JUDGE:-${JUDGE_MODEL}}"
+QUANT_ARG=""; [ -n "${JUDGE_QUANT:-}" ] && QUANT_ARG="--judge-quant ${JUDGE_QUANT}"   # e.g. JUDGE_QUANT=4bit for Qwen-72B
 PROMPTS_JSON="$(realpath "${PROMPTS_JSON:-code/input/complex_biases/${TOPIC}_v1.json}")"
 LOG="${DATA_ROOT}/${MODEL##*/}_${TOPIC}_s${SEED}_d2d_judge.log"
 {
-  echo ">>> judge_d2d ${TOPIC} s${SEED} judge=${JUDGE}  $(date -u)"
+  echo ">>> judge_d2d ${MODEL##*/} ${TOPIC} s${SEED} judge=${JUDGE} ${QUANT_ARG}  $(date -u)"
   (cd code/src && python judge_d2d.py --model "${MODEL}" --topic "${TOPIC}" --seed "${SEED}" \
-      --data-root "${DATA_ROOT}" --prompts-json "${PROMPTS_JSON}" --judge-model "${JUDGE}")
+      --data-root "${DATA_ROOT}" --prompts-json "${PROMPTS_JSON}" --judge-model "${JUDGE}" ${QUANT_ARG})
   rc=$?
   echo "Done: $(date -u)  exit ${rc}"
   exit ${rc}
