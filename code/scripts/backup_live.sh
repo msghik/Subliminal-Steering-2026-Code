@@ -89,12 +89,13 @@ fi
 git push -q origin "$(git rev-parse --abbrev-ref HEAD)" 2>&1 | tail -2 && echo "  git: pushed $(git rev-parse --short HEAD)"
 
 # ── Drive: experiments (skip files that contain a secret) ──
+# HF training checkpoints (checkpoints/**, training_args.bin) embed the hub token and are temporary: never upload them.
 EXCL="${ORCH}/excluded_secret_files.txt"
 ( cd /home/cc/experiments && grep -rlF -f "${TOK}" . 2>/dev/null | sed 's|^\./||' ) > "${EXCL}" || true
 [ -s "${EXCL}" ] && echo "  WARNING: $(wc -l < "${EXCL}") experiment file(s) contain a secret and are not uploaded: ${EXCL}"
 rclone copy /home/cc/experiments "gdrive:${DRIVE_ROOT}/experiments" --exclude-from "${EXCL}" \
   --exclude "subliminal/orchestrator*/backup_stage/**" --exclude "subliminal/orchestrator*/.tokens.*" \
-  --exclude "subliminal/orchestrator*/backup.lock" --transfers 8 --checkers 16 2>&1 | tail -3
+  --exclude "subliminal/orchestrator*/backup.lock" --exclude "**/checkpoints/**" --exclude "**/training_args.bin" --transfers 8 --checkers 16 2>&1 | tail -3
 echo "  drive: experiments copied"
 
 # ── Drive: notes + Claude state (redacted copies) ──
@@ -134,14 +135,14 @@ if [ "${FINAL}" = "1" ]; then
   verified=0
   for attempt in 1 2 3 4; do
     if rclone check /home/cc/experiments "gdrive:${DRIVE_ROOT}/experiments" --one-way --exclude-from "${EXCL}" \
-         --exclude "subliminal/orchestrator*/**" --checkers 4 2>"${ORCH}/rclone_check.txt"; then
+         --exclude "subliminal/orchestrator*/**" --exclude "**/checkpoints/**" --exclude "**/training_args.bin" --checkers 4 2>"${ORCH}/rclone_check.txt"; then
       verified=1; break
     fi
     echo "  check attempt ${attempt} failed: $(grep -c 'ERROR' "${ORCH}/rclone_check.txt") error line(s); re-copying"
     sleep 120
     rclone copy /home/cc/experiments "gdrive:${DRIVE_ROOT}/experiments" --exclude-from "${EXCL}" \
       --exclude "subliminal/orchestrator*/backup_stage/**" --exclude "subliminal/orchestrator*/.tokens.*" \
-      --exclude "subliminal/orchestrator*/backup.lock" --transfers 4 --checkers 4 2>&1 | tail -2
+      --exclude "subliminal/orchestrator*/backup.lock" --exclude "**/checkpoints/**" --exclude "**/training_args.bin" --transfers 4 --checkers 4 2>&1 | tail -2
   done
   if [ "${verified}" = "1" ]; then
     echo "$(ts) final backup verified (rclone check: 0 differences, attempt ${attempt})" | tee "${ORCH}/FINAL_BACKUP_OK"
